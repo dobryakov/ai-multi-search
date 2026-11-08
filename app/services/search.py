@@ -10,6 +10,7 @@ from app.config import Settings, get_settings
 from app.enrich.company_facets import (
     ENRICH_PURPOSE,
     build_facet_queries,
+    build_primary_company_query,
     company_name_for_facets,
     facet_meta_entry,
     merge_primary_and_facet_hits,
@@ -204,6 +205,7 @@ class SearchService:
 
         do_structure = want_structured(req.structured, capability)
         do_enrich = bool(req.enrich) and capability == "company_search"
+        enrich_facets = list(req.enrich_facets) if req.enrich_facets is not None else None
         cache_params = {
             "limit": req.limit,
             "language": req.language,
@@ -213,6 +215,9 @@ class SearchService:
             "type": req.type,
             "structured": do_structure,
             "enrich": do_enrich,
+            "enrich_facets": enrich_facets,
+            "enrich_context": req.enrich_context,
+            "company_enrich_schema": 3,
         }
         cache_key = self.cache.make_key(capability, decision.normalized_query, cache_params)
         cached = await self.cache.get_json(cache_key)
@@ -281,13 +286,26 @@ class SearchService:
                     for a in (response.usage.providers if response.usage else [])
                 ]
             else:
+                company_name = company_name_for_facets(
+                    decision.normalized_query or req.query
+                )
+                primary_query = (
+                    build_primary_company_query(
+                        company_name, req.enrich_context or ""
+                    )
+                    if do_enrich
+                    else decision.normalized_query
+                )
                 provider_req = ProviderRequest(
-                    query=decision.normalized_query,
+                    query=primary_query,
                     limit=req.limit,
                     language=req.language,
                     country=req.country,
                 )
-                raw, used, chain, attempts = await self.manager.execute(capability, provider_req)
+                primary_capability = "web_search" if do_enrich else capability
+                raw, used, chain, attempts = await self.manager.execute(
+                    primary_capability, provider_req
+                )
                 provider_attempts = attempts
                 response = SearchResponse(
                     capability=capability,
@@ -307,12 +325,15 @@ class SearchService:
                         primary=list(response.results),
                         language=req.language,
                         country=req.country,
+                        facet_allowlist=enrich_facets,
+                        context=req.enrich_context or "",
                     )
                     response.results = enrich_out["results"]
                     response.meta["enrich"] = True
                     response.meta["enrich_purpose"] = ENRICH_PURPOSE
                     response.meta["facets"] = enrich_out["facets"]
                     response.meta["enrich_facet_limit"] = enrich_out["enrich_facet_limit"]
+                    response.meta["enrich_primary_query"] = primary_query
                     provider_attempts.extend(enrich_out["attempts"])
                     if enrich_out["fallback_chain"]:
                         response.fallback_chain = list(response.fallback_chain) + list(
@@ -643,6 +664,8 @@ class SearchService:
         primary: list[SearchResultItem],
         language: str | None,
         country: str | None,
+        facet_allowlist: list[str] | None = None,
+        context: str = "",
     ) -> dict[str, Any]:
         """Sequential engage-research facet SERPs with a short delay (soft-fail per facet)."""
         name = company_name_for_facets(company_query)
@@ -653,7 +676,9 @@ class SearchService:
         attempts: list[dict[str, Any]] = []
         chains: list[str] = []
 
-        queries = build_facet_queries(name)
+        queries = build_facet_queries(
+            name, allowlist=facet_allowlist, context=context
+        )
         for index, (facet_id, facet_query) in enumerate(queries):
             if index > 0 and delay_ms:
                 await asyncio.sleep(delay_ms / 1000.0)
@@ -699,7 +724,9 @@ class SearchService:
                 )
 
         return {
-            "results": merge_primary_and_facet_hits(primary, facet_batches),
+            "results": merge_primary_and_facet_hits(
+                primary, facet_batches, primary_facet="funding"
+            ),
             "facets": facet_meta,
             "enrich_facet_limit": facet_limit,
             "attempts": attempts,

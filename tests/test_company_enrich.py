@@ -10,6 +10,7 @@ from app.enrich.company_facets import (
     ENRICH_PURPOSE,
     FACET_TEMPLATES,
     build_facet_queries,
+    build_primary_company_query,
     company_name_for_facets,
     merge_primary_and_facet_hits,
 )
@@ -32,6 +33,20 @@ def test_build_facet_queries_engage_set():
     assert ids == ["culture", "hiring", "funding", "vendors", "initiatives"]
     assert all("Stripe" in q for _, q in queries)
     assert len(FACET_TEMPLATES) == 5
+
+
+def test_funding_primary_and_facet_allowlist_with_context():
+    primary = build_primary_company_query("Pigment", "Software Development")
+    assert primary == (
+        '"Pigment" software company news OR funding OR acquisition'
+    )
+    queries = build_facet_queries(
+        "Pigment",
+        allowlist=["funding", "vendors", "initiatives"],
+        context="Software Development",
+    )
+    assert [facet for facet, _ in queries] == ["funding", "vendors", "initiatives"]
+    assert all('"Pigment" software' in query for _, query in queries)
 
 
 def test_merge_primary_and_facet_hits_dedupes_and_tags():
@@ -177,7 +192,9 @@ async def test_enrich_true_runs_sequential_facets(monkeypatch):
 
     async def fake_execute(capability, request):  # noqa: ANN001
         call_n["n"] += 1
-        if capability == "company_search":
+        if call_n["n"] == 1:
+            assert capability == "web_search"
+            assert request.query == '"Stripe" company news OR funding OR acquisition'
             return (
                 ProviderResponse(
                     results=[
@@ -224,9 +241,62 @@ async def test_enrich_true_runs_sequential_facets(monkeypatch):
     # primary + 5 facet hits
     assert len(resp.results) == 6
     assert resp.results[0].url == "https://stripe.com"
-    assert all(r.extra.get("facet") for r in resp.results[1:])
-    # company primary once + 5 web_search facets
+    assert all(r.extra.get("facet") for r in resp.results)
+    assert resp.results[0].extra.get("facet") == "funding"
+    assert resp.meta["enrich_primary_query"] == (
+        '"Stripe" company news OR funding OR acquisition'
+    )
+    # funding/news primary once + 5 web_search facets
     assert service.manager.execute.await_count == 6
+
+
+@pytest.mark.asyncio
+async def test_enrich_allowlist_limits_facets(monkeypatch):
+    settings = Settings(openrouter_api_key="", structure_model="", enrich_facet_delay_ms=0)
+    service = SearchService(settings=settings)
+    service.intent = AsyncMock()
+    service.intent.route = AsyncMock(
+        return_value=type(
+            "D",
+            (),
+            {
+                "capability": "company_search",
+                "normalized_query": "Pigment",
+                "entities": {},
+                "confidence": 1.0,
+                "source": "explicit",
+                "openrouter_usage": {},
+            },
+        )()
+    )
+    service.cache.get_json = AsyncMock(return_value=None)
+    service.cache.set_json = AsyncMock()
+    service.usage.record_request = AsyncMock()
+    service.usage.record_openrouter = AsyncMock()
+    service.manager.execute = AsyncMock(
+        return_value=(ProviderResponse(results=[]), "searxng", ["searxng"], [])
+    )
+
+    resp = await service.search(
+        SearchRequest(
+            query="Pigment",
+            type="company_search",
+            enrich=True,
+            enrich_facets=["funding", "vendors", "initiatives"],
+            enrich_context="Software Development",
+            structured=False,
+        )
+    )
+    assert [f["id"] for f in resp.meta["facets"]] == [
+        "funding",
+        "vendors",
+        "initiatives",
+    ]
+    assert service.manager.execute.await_count == 4
+    first_request = service.manager.execute.await_args_list[0].args[1]
+    assert first_request.query == (
+        '"Pigment" software company news OR funding OR acquisition'
+    )
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ CapabilityName = Literal[
     "scrape",
     "search_and_scrape",
 ]
+CompanyEnrichFacet = Literal["culture", "hiring", "funding", "vendors", "initiatives"]
 
 
 class SearchRequest(BaseModel):
@@ -24,6 +25,10 @@ class SearchRequest(BaseModel):
     structured: bool | None = None
     # Opt-in engage research fan-out (company_search only). Default off.
     enrich: bool = False
+    # Optional subset of engage facets. None keeps the full generic set.
+    enrich_facets: list[CompanyEnrichFacet] | None = None
+    # Short disambiguation hint such as an industry; used only by enrich queries.
+    enrich_context: str | None = Field(default=None, max_length=200)
 
 
 class ScrapeRequest(BaseModel):
