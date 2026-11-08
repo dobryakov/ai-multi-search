@@ -102,6 +102,11 @@ def create_mcp() -> FastMCP:
         """List currently available search capabilities and providers."""
         return _svc().capabilities().model_dump(mode="json")
 
+    @server.tool()
+    async def get_usage() -> dict[str, Any]:
+        """Provider call counters and OpenRouter Jev cost totals (Redis-backed)."""
+        return await _svc().usage_snapshot()
+
     return server
 
 

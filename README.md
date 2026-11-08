@@ -29,6 +29,7 @@ All `/v1/*` require `Authorization: Bearer <key>` when `API_KEYS` is set.
 - `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10 }`
 - `POST /v1/scrape` — `{ "url": "https://...", "formats": ["markdown"] }`
 - `GET /v1/capabilities`
+- `GET /v1/usage` — provider counters + OpenRouter cost (all-time and today UTC)
 - `GET /health` (no auth)
 - `GET /ready`
 
@@ -37,7 +38,32 @@ All `/v1/*` require `Authorization: Bearer <key>` when `API_KEYS` is set.
 Streamable HTTP endpoint: `{PUBLIC_BASE_URL}/mcp`  
 Local: `http://127.0.0.1:18100/mcp`
 
-Tools: `search`, `search_web`, `search_person`, `search_company`, `scrape`, `list_capabilities`
+Tools: `search`, `search_web`, `search_person`, `search_company`, `scrape`, `list_capabilities`, `get_usage`
+
+Each search/scrape/MCP tool response includes a top-level `usage` block for **this request**:
+
+```json
+{
+  "usage": {
+    "cache_hit": false,
+    "latency_ms": 1234.5,
+    "provider_used": "serper_person",
+    "providers": [
+      {"provider": "serper_person", "outcome": "ok", "latency_ms": 1050.1}
+    ],
+    "openrouter": {
+      "model": "typesafe/jev-1.14-...",
+      "ok": true,
+      "input_tokens": 430,
+      "output_tokens": 62,
+      "cost_usd": 0.000018
+    },
+    "cost_usd": 0.000018
+  }
+}
+```
+
+`cost_usd` is known billed USD for the request (OpenRouter/Jev). Provider calls are listed in `providers[]` even when the upstream API does not return a dollar amount. Aggregates: `GET /v1/usage` / MCP `get_usage`.
 
 ### Cursor (`~/.cursor/mcp.json` or project `.cursor/mcp.json`)
 

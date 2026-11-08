@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.mcp_server import bind_search_service, create_mcp, mcp_asgi_app
 from app.providers.manager import build_default_manager
 from app.services.search import SearchService
+from app.usage.tracker import UsageTracker, set_usage_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,11 @@ def create_app() -> FastAPI:
         await cache.connect()
         set_cache(cache)
 
-        manager = build_default_manager(settings)
-        service = SearchService(manager=manager, cache=cache, settings=settings)
+        usage = UsageTracker(cache=cache, settings=settings)
+        set_usage_tracker(usage)
+
+        manager = build_default_manager(settings, usage=usage)
+        service = SearchService(manager=manager, cache=cache, usage=usage, settings=settings)
         app.state.search_service = service
         bind_search_service(service)
 

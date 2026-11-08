@@ -46,12 +46,45 @@ class ScrapeResult(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProviderAttemptUsage(BaseModel):
+    provider: str
+    outcome: Literal["ok", "empty", "error"]
+    latency_ms: float = 0.0
+    error: str | None = None
+
+
+class OpenRouterRequestUsage(BaseModel):
+    model: str | None = None
+    ok: bool = True
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    id: str | None = None
+    error: str | None = None
+
+
+class RequestUsage(BaseModel):
+    """Per-request spend / provider activity (this call only)."""
+
+    cache_hit: bool = False
+    latency_ms: float = 0.0
+    provider_used: str | None = None
+    providers: list[ProviderAttemptUsage] = Field(default_factory=list)
+    openrouter: OpenRouterRequestUsage | None = None
+    cost_usd: float = 0.0
+    notes: str | None = (
+        "cost_usd is billed USD known for this request (OpenRouter/Jev). "
+        "Search/scrape providers are counted in providers[] but rarely expose per-call USD."
+    )
+
+
 class SearchResponse(BaseModel):
     capability: CapabilityName
     provider_used: str | None = None
     fallback_chain: list[str] = Field(default_factory=list)
     results: list[SearchResultItem] = Field(default_factory=list)
     scrape_results: list[ScrapeResult] = Field(default_factory=list)
+    usage: RequestUsage = Field(default_factory=RequestUsage)
     meta: dict[str, Any] = Field(default_factory=dict)
 
 

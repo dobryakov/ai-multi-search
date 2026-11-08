@@ -30,6 +30,14 @@ async def list_capabilities(
     return service.capabilities()
 
 
+@router.get("/usage")
+async def usage(
+    _: str = Depends(require_api_key),
+    service: SearchService = Depends(get_search_service),
+) -> dict:
+    return await service.usage_snapshot()
+
+
 @router.post("/search", response_model=SearchResponse)
 async def search(
     body: SearchRequest,

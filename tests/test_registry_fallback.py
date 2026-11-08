@@ -56,7 +56,7 @@ class MissingKeyProvider(BaseProvider):
 async def test_fallback_chain_skips_unavailable_and_failures():
     registry = CapabilityRegistry([MissingKeyProvider(), FailProvider(), OkProvider()])
     manager = ProviderManager(registry)
-    response, used, chain = await manager.execute(
+    response, used, chain, attempts = await manager.execute(
         "web_search",
         ProviderRequest(query="q", limit=10),
     )
@@ -64,6 +64,7 @@ async def test_fallback_chain_skips_unavailable_and_failures():
     assert chain == ["fail", "ok"]
     assert len(response.results) == 1
     assert response.results[0].url == "https://a.example"
+    assert [a["outcome"] for a in attempts] == ["error", "ok"]
 
 
 def test_dedupe_results():

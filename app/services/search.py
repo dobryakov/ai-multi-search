@@ -10,6 +10,9 @@ from app.intent.router import IntentRouter
 from app.normalize.schema import (
     CapabilitiesResponse,
     CapabilityName,
+    OpenRouterRequestUsage,
+    ProviderAttemptUsage,
+    RequestUsage,
     ScrapeRequest,
     ScrapeResult,
     SearchRequest,
@@ -52,6 +55,56 @@ class SearchService:
             input_tokens=int(usage.get("input_tokens") or 0),
             output_tokens=int(usage.get("output_tokens") or 0),
             cost=float(usage.get("cost_usd") or 0.0),
+        )
+
+    @staticmethod
+    def _openrouter_block(raw: dict[str, Any] | None) -> OpenRouterRequestUsage | None:
+        if not raw:
+            return None
+        return OpenRouterRequestUsage(
+            model=raw.get("model"),
+            ok=bool(raw.get("ok", True)),
+            input_tokens=int(raw.get("input_tokens") or 0),
+            output_tokens=int(raw.get("output_tokens") or 0),
+            cost_usd=float(raw.get("cost_usd") or 0.0),
+            id=raw.get("id"),
+            error=raw.get("error"),
+        )
+
+    @staticmethod
+    def _provider_blocks(attempts: list[dict[str, Any]] | None) -> list[ProviderAttemptUsage]:
+        out: list[ProviderAttemptUsage] = []
+        for item in attempts or []:
+            outcome = item.get("outcome") or "error"
+            if outcome not in {"ok", "empty", "error"}:
+                outcome = "error"
+            out.append(
+                ProviderAttemptUsage(
+                    provider=str(item.get("provider") or "unknown"),
+                    outcome=outcome,  # type: ignore[arg-type]
+                    latency_ms=float(item.get("latency_ms") or 0.0),
+                    error=item.get("error"),
+                )
+            )
+        return out
+
+    def _build_usage(
+        self,
+        *,
+        provider_used: str | None,
+        attempts: list[dict[str, Any]] | None,
+        openrouter_raw: dict[str, Any] | None,
+        cache_hit: bool,
+        latency_ms: float,
+    ) -> RequestUsage:
+        openrouter = self._openrouter_block(openrouter_raw)
+        return RequestUsage(
+            cache_hit=cache_hit,
+            latency_ms=round(latency_ms, 1),
+            provider_used=provider_used,
+            providers=self._provider_blocks(attempts),
+            openrouter=openrouter,
+            cost_usd=float(openrouter.cost_usd) if openrouter else 0.0,
         )
 
     def _log_request(
@@ -104,23 +157,35 @@ class SearchService:
         cached = await self.cache.get_json(cache_key)
         if cached:
             response = SearchResponse.model_validate(cached)
+            latency_ms = (time.perf_counter() - started) * 1000
+            # Cache hit: reuse stored provider activity, attach fresh OpenRouter cost for this call.
+            prior_attempts = [
+                a.model_dump() if hasattr(a, "model_dump") else a
+                for a in (response.usage.providers if response.usage else [])
+            ] or list(response.meta.get("provider_attempts") or [])
             response.meta = {
-                **response.meta,
-                "cache_hit": True,
                 "intent_source": decision.source,
                 "confidence": decision.confidence,
-                "openrouter_usage": decision.openrouter_usage or response.meta.get("openrouter_usage"),
+                "cache_hit": True,
             }
+            response.usage = self._build_usage(
+                provider_used=response.provider_used,
+                attempts=prior_attempts,
+                openrouter_raw=decision.openrouter_usage,
+                cache_hit=True,
+                latency_ms=latency_ms,
+            )
             await self.usage.record_request(capability=capability, status="ok", cache_hit=True)
             self._log_request(
                 capability=capability,
                 query=req.query,
                 provider_used=response.provider_used,
                 fallback_chain=response.fallback_chain,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=latency_ms,
                 status="ok",
                 api_key_hint=api_key_hint,
                 openrouter_usage=decision.openrouter_usage,
+                provider_attempts=prior_attempts,
             )
             return response
 
@@ -139,13 +204,14 @@ class SearchService:
                         "intent_source": decision.source,
                         "confidence": decision.confidence,
                         "cache_hit": False,
-                        "openrouter_usage": decision.openrouter_usage or None,
-                        "provider_attempts": provider_attempts,
                     },
                 )
             elif capability == "search_and_scrape":
                 response = await self._search_and_scrape(req, decision.normalized_query, decision)
-                provider_attempts = list(response.meta.get("provider_attempts") or [])
+                provider_attempts = [
+                    a.model_dump() if hasattr(a, "model_dump") else a
+                    for a in (response.usage.providers if response.usage else [])
+                ]
             else:
                 provider_req = ProviderRequest(
                     query=decision.normalized_query,
@@ -165,11 +231,17 @@ class SearchService:
                         "confidence": decision.confidence,
                         "cache_hit": False,
                         "errors": raw.raw.get("errors"),
-                        "openrouter_usage": decision.openrouter_usage or None,
-                        "provider_attempts": attempts,
                     },
                 )
 
+            latency_ms = (time.perf_counter() - started) * 1000
+            response.usage = self._build_usage(
+                provider_used=response.provider_used,
+                attempts=provider_attempts,
+                openrouter_raw=decision.openrouter_usage,
+                cache_hit=False,
+                latency_ms=latency_ms,
+            )
             status = "ok" if (response.results or response.scrape_results) else "empty"
             await self.cache.set_json(cache_key, response.model_dump(mode="json"))
             await self.usage.record_request(capability=capability, status=status, cache_hit=False)
@@ -178,7 +250,7 @@ class SearchService:
                 query=req.query,
                 provider_used=response.provider_used,
                 fallback_chain=response.fallback_chain,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=latency_ms,
                 status=status,
                 api_key_hint=api_key_hint,
                 openrouter_usage=decision.openrouter_usage,
@@ -206,15 +278,20 @@ class SearchService:
         url = str(req.url)
         try:
             scrape_resp = await self._scrape_url(url, req.formats)
+            latency_ms = (time.perf_counter() - started) * 1000
             response = SearchResponse(
                 capability="scrape",
                 provider_used=scrape_resp["provider_used"],
                 fallback_chain=scrape_resp["fallback_chain"],
                 scrape_results=scrape_resp["results"],
-                meta={
-                    "cache_hit": False,
-                    "provider_attempts": scrape_resp["attempts"],
-                },
+                usage=self._build_usage(
+                    provider_used=scrape_resp["provider_used"],
+                    attempts=scrape_resp["attempts"],
+                    openrouter_raw=None,
+                    cache_hit=False,
+                    latency_ms=latency_ms,
+                ),
+                meta={"cache_hit": False},
             )
             status = "ok" if response.scrape_results else "empty"
             await self.usage.record_request(capability="scrape", status=status, cache_hit=False)
@@ -223,7 +300,7 @@ class SearchService:
                 query=url,
                 provider_used=response.provider_used,
                 fallback_chain=response.fallback_chain,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=latency_ms,
                 status=status,
                 api_key_hint=api_key_hint,
                 provider_attempts=scrape_resp["attempts"],
@@ -291,11 +368,16 @@ class SearchService:
             fallback_chain=chain + scrape_chain,
             results=raw.results,
             scrape_results=scrape_results,
+            usage=self._build_usage(
+                provider_used=used,
+                attempts=all_attempts,
+                openrouter_raw=decision.openrouter_usage,
+                cache_hit=False,
+                latency_ms=0.0,
+            ),
             meta={
                 "intent_source": decision.source,
                 "confidence": decision.confidence,
                 "cache_hit": False,
-                "openrouter_usage": decision.openrouter_usage or None,
-                "provider_attempts": all_attempts,
             },
         )

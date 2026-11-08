@@ -1,7 +1,10 @@
 from app.normalize.schema import (
     CapabilitiesResponse,
     CapabilityInfo,
+    OpenRouterRequestUsage,
+    ProviderAttemptUsage,
     ProviderInfo,
+    RequestUsage,
     ScrapeRequest,
     ScrapeResult,
     SearchRequest,
@@ -12,7 +15,10 @@ from app.normalize.schema import (
 __all__ = [
     "CapabilitiesResponse",
     "CapabilityInfo",
+    "OpenRouterRequestUsage",
+    "ProviderAttemptUsage",
     "ProviderInfo",
+    "RequestUsage",
     "ScrapeRequest",
     "ScrapeResult",
     "SearchRequest",
