@@ -12,6 +12,34 @@ async def test_explicit_type_skips_llm():
 
 
 @pytest.mark.asyncio
+async def test_explicit_person_keeps_vanity_id():
+    router = IntentRouter()
+    decision = await router.route("rbranson", explicit_type="person_search")
+    assert decision.normalized_query == "rbranson"
+    assert decision.entities.get("linkedin_person_slug") == "rbranson"
+
+
+@pytest.mark.asyncio
+async def test_explicit_person_keeps_profile_url():
+    router = IntentRouter()
+    q = "https://www.linkedin.com/in/dobryakov"
+    decision = await router.route(q, explicit_type="person_search")
+    assert decision.normalized_query == q
+    assert decision.entities.get("linkedin_person_slug") == "dobryakov"
+
+
+@pytest.mark.asyncio
+async def test_explicit_person_rewrites_full_name():
+    router = IntentRouter()
+    decision = await router.route("who is Grigoriy Dobryakov", explicit_type="person_search")
+    assert decision.normalized_query == "Grigoriy Dobryakov"
+    assert decision.entities.get("person_name") == {
+        "first_name": "Grigoriy",
+        "last_name": "Dobryakov",
+    }
+
+
+@pytest.mark.asyncio
 async def test_heuristic_person(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     monkeypatch.setenv("LLM_API_KEY", "")

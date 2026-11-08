@@ -112,10 +112,13 @@ def extract_person_name(query: str) -> tuple[str, str] | None:
     if any(p.lower() in _ROLE_WORDS for p in parts):
         return None
 
+    # Single token is a LinkedIn vanity id (or incomplete name), not first+last.
+    # Duplicating it ("rbranson" → "rbranson rbranson") breaks Profile-by-id.
     if len(parts) == 1:
-        token = parts[0]
-        if token[0].isalpha() and token.lower() not in _STOP:
-            return token, token
+        return None
+
+    # URLs / path-like tokens are not personal names.
+    if any("/" in p or "://" in p.lower() or "linkedin.com" in p.lower() for p in parts):
         return None
 
     first, last = parts[0], " ".join(parts[1:])

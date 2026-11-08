@@ -20,6 +20,14 @@ def test_extract_strips_who_is_prefix():
     assert extract_person_name("who is Grigoriy Dobryakov") == ("Grigoriy", "Dobryakov")
 
 
+def test_extract_rejects_single_token_and_urls():
+    # Vanity ids must not become ("x","x") → "x x" and break Profile-by-id.
+    assert extract_person_name("rbranson") is None
+    assert extract_person_name("dobryakov") is None
+    assert extract_person_name("https://www.linkedin.com/in/rbranson") is None
+    assert extract_person_name("linkedin.com/in/dobryakov") is None
+
+
 class _Web(BaseProvider):
     name = "w"
     capability = "web_search"
