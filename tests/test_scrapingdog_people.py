@@ -30,7 +30,7 @@ async def test_scrapingdog_people_profile_by_id():
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
     with patch(
-        "app.providers.person_scrapingdog.get_http_client", return_value=mock_client
+        "app.providers.scrapingdog_profile.get_http_client", return_value=mock_client
     ):
         out = await provider.run(
             ProviderRequest(
@@ -48,6 +48,7 @@ async def test_scrapingdog_people_profile_by_id():
     params = mock_client.get.await_args.kwargs["params"]
     assert params["type"] == "profile"
     assert params["id"] == "rbranson"
+    assert params["premium"] == "true"
 
 
 @pytest.mark.asyncio

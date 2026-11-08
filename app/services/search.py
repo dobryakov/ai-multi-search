@@ -10,6 +10,8 @@ from app.intent.router import IntentRouter
 from app.normalize.schema import (
     CapabilitiesResponse,
     CapabilityName,
+    LinkedInProfileRequest,
+    LinkedInProfileResponse,
     OpenRouterRequestUsage,
     ProviderAttemptUsage,
     RequestUsage,
@@ -19,8 +21,21 @@ from app.normalize.schema import (
     SearchResponse,
 )
 from app.providers.base import ProviderRequest
-from app.providers.cooldown import ProviderCooldownout, get_provider_cooldown
+from app.providers.cooldown import (
+    ProviderCooldownout,
+    cooldown_reason_from_error,
+    get_provider_cooldown,
+)
+from app.providers.errors import ProviderEndpointError
 from app.providers.manager import ProviderManager, build_default_manager
+from app.providers.scrapingdog_profile import (
+    COOLDOWN_ALIASES,
+    PROVIDER_NAME as SCRAPINGDOG_PROFILE,
+    fetch_scrapingdog_profile,
+    resolve_premium,
+    resolve_profile_id,
+    unwrap_profile_payload,
+)
 from app.structure.extractor import (
     StructureExtractor,
     merge_openrouter_usage,
@@ -325,6 +340,210 @@ class SearchService:
                 api_key_hint=api_key_hint,
                 error=str(exc),
                 openrouter_usage=merge_openrouter_usage(decision.openrouter_usage, structure_usage),
+                provider_attempts=provider_attempts,
+            )
+            raise
+
+    async def _linkedin_cooldown_active(self) -> dict[str, Any] | None:
+        """Any Scrapingdog Profile sibling on cooldown blocks the forced endpoint."""
+        best: dict[str, Any] | None = None
+        for name in COOLDOWN_ALIASES:
+            info = await self.cooldown.get(name)
+            if not info:
+                continue
+            if best is None or int(info.get("remaining_seconds") or 0) > int(
+                best.get("remaining_seconds") or 0
+            ):
+                best = info
+        return best
+
+    async def _mark_linkedin_cooldown(self, reason: str) -> int | None:
+        remaining = None
+        for name in COOLDOWN_ALIASES:
+            remaining = await self.cooldown.mark(name, reason)
+        return remaining
+
+    async def linkedin_profile(
+        self,
+        req: LinkedInProfileRequest,
+        *,
+        api_key_hint: str = "",
+    ) -> LinkedInProfileResponse:
+        """Forced Scrapingdog Profile API — no SERP / Firecrawl / fallback chain."""
+        started = time.perf_counter()
+        slug, canonical_url = resolve_profile_id(
+            kind=req.type,
+            profile_id=req.id,
+            url=req.url,
+        )
+        premium = resolve_premium(self.settings, req.premium)
+
+        if not self.settings.scrapingdog_api_key.strip():
+            raise ProviderEndpointError(
+                "scrapingdog profile unavailable: SCRAPINGDOG_API_KEY not configured",
+                endpoint="profile",
+                endpoint_attempts=[
+                    {
+                        "endpoint": "profile",
+                        "type": "profile" if req.type == "person" else "company",
+                        "skipped": True,
+                        "reason": "no_api_key",
+                    }
+                ],
+            )
+
+        cooling = await self._linkedin_cooldown_active()
+        if cooling:
+            remaining = int(cooling.get("remaining_seconds") or 0)
+            latency_ms = (time.perf_counter() - started) * 1000
+            attempt = {
+                "provider": SCRAPINGDOG_PROFILE,
+                "outcome": "skipped_cooldown",
+                "latency_ms": 0.0,
+                "cooldown_remaining_seconds": remaining,
+                "error": f"cooldown:{cooling.get('reason')}",
+                "endpoint": "profile",
+            }
+            await self.usage.record_request(
+                capability=f"linkedin_profile_{req.type}",
+                status="error",
+                cache_hit=False,
+            )
+            self._log_request(
+                capability=f"linkedin_profile_{req.type}",
+                query=f"{req.type}:{slug}",
+                provider_used=None,
+                fallback_chain=[SCRAPINGDOG_PROFILE],
+                latency_ms=latency_ms,
+                status="error",
+                api_key_hint=api_key_hint,
+                error=attempt["error"],
+                provider_attempts=[attempt],
+            )
+            raise ProviderEndpointError(
+                f"scrapingdog profile cooling down ({remaining}s): {cooling.get('reason')}",
+                endpoint="profile",
+                endpoint_attempts=[
+                    {
+                        "endpoint": "profile",
+                        "skipped": True,
+                        "reason": "cooldown",
+                        "cooldown_remaining_seconds": remaining,
+                    }
+                ],
+            )
+
+        provider_attempts: list[dict[str, Any]] = []
+        try:
+            data, endpoint_attempts = await fetch_scrapingdog_profile(
+                settings=self.settings,
+                kind=req.type,
+                profile_id=slug,
+                premium=premium,
+            )
+            latency_ms = (time.perf_counter() - started) * 1000
+            attempt = {
+                "provider": SCRAPINGDOG_PROFILE,
+                "outcome": "ok",
+                "latency_ms": round(latency_ms, 1),
+                "endpoint": "profile",
+                "endpoint_attempts": endpoint_attempts,
+            }
+            provider_attempts = [attempt]
+            await self.usage.record_provider(
+                provider=SCRAPINGDOG_PROFILE,
+                outcome="ok",
+                latency_ms=latency_ms,
+            )
+            response = LinkedInProfileResponse(
+                type=req.type,
+                id=slug,
+                url=canonical_url,
+                provider_used=SCRAPINGDOG_PROFILE,
+                premium=premium,
+                profile=unwrap_profile_payload(data),
+                usage=self._build_usage(
+                    provider_used=SCRAPINGDOG_PROFILE,
+                    attempts=provider_attempts,
+                    openrouter_raw=None,
+                    cache_hit=False,
+                    latency_ms=latency_ms,
+                ),
+                meta={
+                    "endpoint": "profile",
+                    "scrapingdog_type": "profile" if req.type == "person" else "company",
+                },
+            )
+            await self.usage.record_request(
+                capability=f"linkedin_profile_{req.type}",
+                status="ok",
+                cache_hit=False,
+            )
+            self._log_request(
+                capability=f"linkedin_profile_{req.type}",
+                query=f"{req.type}:{slug}",
+                provider_used=SCRAPINGDOG_PROFILE,
+                fallback_chain=[SCRAPINGDOG_PROFILE],
+                latency_ms=latency_ms,
+                status="ok",
+                api_key_hint=api_key_hint,
+                provider_attempts=provider_attempts,
+            )
+            return response
+        except ProviderEndpointError as exc:
+            latency_ms = (time.perf_counter() - started) * 1000
+            await self.usage.record_provider(
+                provider=SCRAPINGDOG_PROFILE,
+                outcome="error",
+                latency_ms=latency_ms,
+            )
+            reason = cooldown_reason_from_error(exc)
+            cooldown_remaining = None
+            if reason:
+                cooldown_remaining = await self._mark_linkedin_cooldown(reason)
+            attempt = {
+                "provider": SCRAPINGDOG_PROFILE,
+                "outcome": "error",
+                "latency_ms": round(latency_ms, 1),
+                "error": str(exc)[:300],
+                "cooldown_remaining_seconds": cooldown_remaining or None,
+                "endpoint": getattr(exc, "endpoint", None),
+                "endpoint_attempts": getattr(exc, "endpoint_attempts", None),
+            }
+            provider_attempts = [attempt]
+            await self.usage.record_request(
+                capability=f"linkedin_profile_{req.type}",
+                status="error",
+                cache_hit=False,
+            )
+            self._log_request(
+                capability=f"linkedin_profile_{req.type}",
+                query=f"{req.type}:{slug}",
+                provider_used=None,
+                fallback_chain=[SCRAPINGDOG_PROFILE],
+                latency_ms=latency_ms,
+                status="error",
+                api_key_hint=api_key_hint,
+                error=str(exc),
+                provider_attempts=provider_attempts,
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001
+            latency_ms = (time.perf_counter() - started) * 1000
+            await self.usage.record_request(
+                capability=f"linkedin_profile_{req.type}",
+                status="error",
+                cache_hit=False,
+            )
+            self._log_request(
+                capability=f"linkedin_profile_{req.type}",
+                query=f"{req.type}:{slug}",
+                provider_used=None,
+                fallback_chain=[SCRAPINGDOG_PROFILE],
+                latency_ms=latency_ms,
+                status="error",
+                api_key_hint=api_key_hint,
+                error=str(exc),
                 provider_attempts=provider_attempts,
             )
             raise

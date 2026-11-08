@@ -4,7 +4,7 @@ Capability-based multi-provider internet search microservice with HTTP API and M
 
 ## Features
 
-- Extensible capabilities: `web_search`, `person_search`, `company_search`, `scrape`, `search_and_scrape`
+- Extensible capabilities: `web_search`, `person_search`, `company_search`, `scrape`, `search_and_scrape`, plus forced `linkedin_profile`
 - Intent routing: cheap LLM (OpenAI-compatible) with soft heuristic fallback
 - Optional/auto **structured entity extraction** (person/company) via a cheap OpenRouter chat model
 - Dynamic provider selection from currently available keys/URLs
@@ -31,6 +31,7 @@ All `/v1/*` require `Authorization: Bearer <key>` when `API_KEYS` is set.
 
 - `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10, "structured?": true|false|null }`
 - `POST /v1/scrape` — `{ "url": "https://...", "formats": ["markdown"] }`
+- `POST /v1/linkedin/profile` — forced Scrapingdog Profile API (see below)
 - `GET /v1/capabilities`
 - `GET /v1/usage` — provider counters + OpenRouter cost (all-time and today UTC)
 - `GET /health` (no auth)
@@ -75,7 +76,7 @@ Company uses `kind: "company"` (`name`, `domain`, `industry`, `headquarters`, `l
 Streamable HTTP endpoint: `{PUBLIC_BASE_URL}/mcp`  
 Local: `http://127.0.0.1:18100/mcp`
 
-Tools: `search`, `search_web`, `search_person`, `search_company`, `scrape`, `list_capabilities`, `get_usage`
+Tools: `search`, `search_web`, `search_person`, `search_company`, `scrape`, `linkedin_profile`, `list_capabilities`, `get_usage`
 
 Each search/scrape/MCP tool response includes a top-level `usage` block for **this request**:
 
@@ -120,6 +121,58 @@ Person/company flows try specialized providers first, then the rest of `web_sear
 **People by LinkedIn id (expensive):** `scrapingdog_people` uses Profile API `GET /profile/?type=profile&id=<linkedin_id>` when the query is a LinkedIn person URL (`linkedin.com/in/rbranson`) or a bare vanity id (`rbranson`). **Cost: 50–100 Scrapingdog credits per successful request.** Free-text names skip this provider with no HTTP call. Prefer SERP discovery first; use Profile only when you already have the id and need full profile JSON.
 
 `scrapingdog_company` uses Profile API `GET /profile/?type=company&id=<linkedin_slug>` (docs example is by LinkedIn universal name like `amazon`, **not** free-text name search). Expensive (~50 credits) — runs only after cheaper company/web providers, just before `scrapingdog_google`. Skips when no slug/URL can be derived.
+
+Both Profile providers send `premium=true` when `SCRAPINGDOG_LINKEDIN_PREMIUM` is on (default **true**).
+
+### Forced LinkedIn Profile (`POST /v1/linkedin/profile`)
+
+Use this when you already have a LinkedIn vanity id or URL and need the **full Scrapingdog Profile JSON** (`experience`, `activities`, company roster/geo, …) — not SERP search hits. MCP mirror: `linkedin_profile`.
+
+| | |
+|---|---|
+| Path | `POST /v1/linkedin/profile` |
+| Upstream | **only** Scrapingdog `GET /profile/?type=profile\|company&id=…` |
+| No | Serper / SearXNG / Firecrawl / search fallback chain |
+| Auth | same bearer as other `/v1/*` |
+| Env | `SCRAPINGDOG_API_KEY`, `SCRAPINGDOG_LINKEDIN_PREMIUM` (default `true`) |
+
+**Request** — provide exactly one of `id` or `url` (`type` required):
+
+```json
+{ "type": "person", "id": "dobryakov" }
+```
+
+```json
+{ "type": "company", "url": "https://www.linkedin.com/company/jetbrains" }
+```
+
+Optional `premium: true|false` overrides the env default. Free-text (`"JetBrains CEO"`, `"who is X"`) → **400** (this is not a search endpoint).
+
+**Response** — lossless upstream JSON in `profile`:
+
+```json
+{
+  "type": "person",
+  "id": "dobryakov",
+  "url": "https://www.linkedin.com/in/dobryakov",
+  "provider_used": "scrapingdog_profile",
+  "premium": true,
+  "profile": { "experience": [], "activities": [], "location": "...", "public_identifier": "dobryakov" },
+  "usage": {
+    "provider_used": "scrapingdog_profile",
+    "providers": [{ "provider": "scrapingdog_profile", "outcome": "ok", "latency_ms": 1200.0 }]
+  }
+}
+```
+
+Upstream HTTP errors are propagated (status + detail). Cooldown is shared with `scrapingdog_people` / `scrapingdog_company`. `person_search` / `company_search` stay unchanged (SERP + optional Profile inside the chain).
+
+```bash
+curl -s -X POST http://127.0.0.1:18100/v1/linkedin/profile \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"person","id":"dobryakov"}'
+```
 
 `search_and_scrape` is a composite of available `web_search` + `scrape` providers (no dedicated provider class).
 

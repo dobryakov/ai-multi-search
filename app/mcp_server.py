@@ -7,7 +7,9 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.normalize.schema import ScrapeRequest, SearchRequest
+from app.normalize.schema import LinkedInProfileRequest, ScrapeRequest, SearchRequest
+from app.providers.errors import ProviderEndpointError
+from app.providers.scrapingdog_profile import LinkedInProfileValidationError
 from app.services.search import SearchService
 
 _service: SearchService | None = None
@@ -30,7 +32,9 @@ def create_mcp() -> FastMCP:
         "ai-multi-search",
         instructions=(
             "Multi-provider internet search. Use search for free-text intents, "
-            "or search_web/search_person/search_company for explicit capability routing."
+            "or search_web/search_person/search_company for explicit capability routing. "
+            "Use linkedin_profile when you already have a LinkedIn vanity id or URL and "
+            "need the full Scrapingdog Profile JSON (no SERP fallback)."
         ),
         streamable_http_path="/",
         stateless_http=True,
@@ -127,6 +131,34 @@ def create_mcp() -> FastMCP:
             api_key_hint="mcp",
         )
         return resp.model_dump(mode="json")
+
+    @server.tool()
+    async def linkedin_profile(
+        type: str,
+        id: str | None = None,
+        url: str | None = None,
+        premium: bool | None = None,
+    ) -> dict[str, Any]:
+        """Fetch full LinkedIn person/company JSON via Scrapingdog Profile API only.
+
+        type: "person" or "company". Provide exactly one of id (vanity slug) or url.
+        No SERP / Firecrawl / fallback. Free-text names are rejected.
+        """
+        if type not in {"person", "company"}:
+            return {
+                "error": "invalid_type",
+                "message": 'type must be "person" or "company"',
+            }
+        try:
+            resp = await _svc().linkedin_profile(
+                LinkedInProfileRequest(type=type, id=id, url=url, premium=premium),  # type: ignore[arg-type]
+                api_key_hint="mcp",
+            )
+            return resp.model_dump(mode="json")
+        except LinkedInProfileValidationError as exc:
+            return {"error": "validation_error", "message": str(exc), "status": 400}
+        except ProviderEndpointError as exc:
+            return {"error": "provider_error", "message": str(exc)}
 
     @server.tool()
     async def list_capabilities() -> dict[str, Any]:

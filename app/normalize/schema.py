@@ -29,6 +29,19 @@ class ScrapeRequest(BaseModel):
     formats: list[str] = Field(default_factory=lambda: ["markdown"])
 
 
+class LinkedInProfileRequest(BaseModel):
+    """Forced Scrapingdog LinkedIn Profile API (no SERP / fallback).
+
+    Provide exactly one of ``id`` (vanity slug) or ``url`` (LinkedIn /in or /company).
+    """
+
+    type: Literal["person", "company"]
+    id: str | None = Field(default=None, max_length=200)
+    url: str | None = Field(default=None, max_length=500)
+    # None → Settings.scrapingdog_linkedin_premium (default True).
+    premium: bool | None = None
+
+
 class SearchResultItem(BaseModel):
     title: str = ""
     url: str = ""
@@ -83,6 +96,17 @@ class RequestUsage(BaseModel):
         "cost_usd is billed USD known for this request (OpenRouter/Jev). "
         "Search/scrape providers are counted in providers[] but rarely expose per-call USD."
     )
+
+
+class LinkedInProfileResponse(BaseModel):
+    type: Literal["person", "company"]
+    id: str
+    url: str
+    provider_used: str = "scrapingdog_profile"
+    premium: bool = True
+    profile: Any
+    usage: RequestUsage = Field(default_factory=RequestUsage)
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):

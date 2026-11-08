@@ -9,8 +9,11 @@ from app.normalize.schema import SearchResultItem
 from app.providers.base import BaseProvider, ProviderRequest, ProviderResponse
 from app.providers.company_slug import linkedin_company_slug
 from app.providers.errors import ProviderEndpointError
-from app.providers.http_util import get_http_client
 from app.providers.person_slug import linkedin_person_slug
+from app.providers.scrapingdog_profile import (
+    fetch_scrapingdog_profile,
+    resolve_premium,
+)
 
 _API_KEY_RE = re.compile(r"(api_key=)[^&]+", re.I)
 
@@ -85,31 +88,13 @@ class ScrapingdogPeopleProvider(BaseProvider):
                 },
             )
 
-        params = {
-            "api_key": self.settings.scrapingdog_api_key,
-            "type": "profile",
-            "id": slug,
-        }
-        async with get_http_client() as client:
-            resp = await client.get("https://api.scrapingdog.com/profile/", params=params)
-        endpoint_attempts = [
-            {
-                "endpoint": "profile",
-                "type": "profile",
-                "id": slug,
-                "status_code": resp.status_code,
-            }
-        ]
-        if resp.status_code >= 400:
-            detail = resp.text[:300]
-            raise ProviderEndpointError(
-                f"scrapingdog profile person failed status={resp.status_code} "
-                f"id={slug!r} body={detail}",
-                endpoint="profile",
-                endpoint_attempts=endpoint_attempts,
-            )
-
-        data = resp.json()
+        premium = resolve_premium(self.settings, None)
+        data, endpoint_attempts = await fetch_scrapingdog_profile(
+            settings=self.settings,
+            kind="person",
+            profile_id=slug,
+            premium=premium,
+        )
         items = data if isinstance(data, list) else [data]
         results: list[SearchResultItem] = []
         for item in items[: request.limit]:
@@ -179,6 +164,7 @@ class ScrapingdogPeopleProvider(BaseProvider):
                 "endpoint": "profile",
                 "endpoint_attempts": endpoint_attempts,
                 "items": data,
+                "premium": premium,
             },
         )
 
@@ -221,31 +207,13 @@ class ScrapingdogCompanyProvider(BaseProvider):
                 ],
             )
 
-        params = {
-            "api_key": self.settings.scrapingdog_api_key,
-            "type": "company",
-            "id": slug,
-        }
-        async with get_http_client() as client:
-            resp = await client.get("https://api.scrapingdog.com/profile/", params=params)
-        endpoint_attempts = [
-            {
-                "endpoint": "profile",
-                "type": "company",
-                "id": slug,
-                "status_code": resp.status_code,
-            }
-        ]
-        if resp.status_code >= 400:
-            detail = resp.text[:300]
-            raise ProviderEndpointError(
-                f"scrapingdog profile company failed status={resp.status_code} "
-                f"id={slug!r} body={detail}",
-                endpoint="profile",
-                endpoint_attempts=endpoint_attempts,
-            )
-
-        data = resp.json()
+        premium = resolve_premium(self.settings, None)
+        data, endpoint_attempts = await fetch_scrapingdog_profile(
+            settings=self.settings,
+            kind="company",
+            profile_id=slug,
+            premium=premium,
+        )
         items = data if isinstance(data, list) else [data]
         results: list[SearchResultItem] = []
         for item in items[: request.limit]:
@@ -295,5 +263,6 @@ class ScrapingdogCompanyProvider(BaseProvider):
                 "endpoint": "profile",
                 "endpoint_attempts": endpoint_attempts,
                 "items": data,
+                "premium": premium,
             },
         )

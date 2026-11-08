@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""
     firecrawl_base_url: str = "https://api.firecrawl.dev"
     scrapingdog_api_key: str = ""
+    # LinkedIn Profile API (`/profile`): premium proxies. Default on — without
+    # premium Scrapingdog often returns 400 / thin payloads for LinkedIn.
+    scrapingdog_linkedin_premium: bool = True
     crawl4ai_url: str = ""
 
     http_timeout_seconds: float = 30.0
