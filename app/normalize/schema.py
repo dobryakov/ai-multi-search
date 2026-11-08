@@ -20,6 +20,8 @@ class SearchRequest(BaseModel):
     country: str | None = None
     scrape: bool = False
     formats: list[str] = Field(default_factory=lambda: ["markdown"])
+    # None = auto (on for person_search/company_search). True/False force.
+    structured: bool | None = None
 
 
 class ScrapeRequest(BaseModel):
@@ -64,6 +66,8 @@ class OpenRouterRequestUsage(BaseModel):
     cost_usd: float = 0.0
     id: str | None = None
     error: str | None = None
+    purpose: str | None = None
+    parts: list[dict[str, Any]] | None = None
 
 
 class RequestUsage(BaseModel):
@@ -87,6 +91,8 @@ class SearchResponse(BaseModel):
     fallback_chain: list[str] = Field(default_factory=list)
     results: list[SearchResultItem] = Field(default_factory=list)
     scrape_results: list[ScrapeResult] = Field(default_factory=list)
+    # LLM-normalized entity object (person/company/web); null when skipped/failed.
+    structured: dict[str, Any] | None = None
     usage: RequestUsage = Field(default_factory=RequestUsage)
     meta: dict[str, Any] = Field(default_factory=dict)
 

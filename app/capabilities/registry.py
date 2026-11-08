@@ -33,6 +33,9 @@ class CapabilityRegistry:
         for provider in self._providers:
             by_cap[provider.capability].append(provider)
 
+        web_available = any(p.available() for p in by_cap.get("web_search", []))  # type: ignore[arg-type]
+        scrape_available = any(p.available() for p in by_cap.get("scrape", []))  # type: ignore[arg-type]
+
         capabilities: list[CapabilityInfo] = []
         for name in (
             "web_search",
@@ -41,17 +44,30 @@ class CapabilityRegistry:
             "scrape",
             "search_and_scrape",
         ):
-            providers = by_cap.get(name, [])  # type: ignore[arg-type]
-            infos = [
-                ProviderInfo(
-                    name=p.name,
-                    capability=p.capability,
-                    available=p.available(),
-                    priority=p.priority,
-                    cost=p.cost,
-                )
-                for p in sorted(providers, key=lambda x: (x.priority, x.cost, x.name))
-            ]
+            if name == "search_and_scrape":
+                # Composite capability: web_search then scrape (see SearchService).
+                available = web_available and scrape_available
+                infos = [
+                    ProviderInfo(
+                        name="composite:web_search+scrape",
+                        capability="search_and_scrape",
+                        available=available,
+                        priority=10,
+                        cost=0,
+                    )
+                ]
+            else:
+                providers = by_cap.get(name, [])  # type: ignore[arg-type]
+                infos = [
+                    ProviderInfo(
+                        name=p.name,
+                        capability=p.capability,
+                        available=p.available(),
+                        priority=p.priority,
+                        cost=p.cost,
+                    )
+                    for p in sorted(providers, key=lambda x: (x.priority, x.cost, x.name))
+                ]
             capabilities.append(
                 CapabilityInfo(
                     name=name,  # type: ignore[arg-type]

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     llm_model: str = "typesafe/jev-1.14"
     intent_confidence_threshold: float = 0.55
     llm_timeout_seconds: float = 12.0
+    # Cheap OpenRouter chat model for post-search entity structuring.
+    structure_model: str = "google/gemini-2.5-flash-lite"
+    structure_timeout_seconds: float = 15.0
 
     # Provider keys / URLs
     searxng_url: str = ""

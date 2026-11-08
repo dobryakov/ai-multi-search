@@ -6,6 +6,7 @@ Capability-based multi-provider internet search microservice with HTTP API and M
 
 - Extensible capabilities: `web_search`, `person_search`, `company_search`, `scrape`, `search_and_scrape`
 - Intent routing: cheap LLM (OpenAI-compatible) with soft heuristic fallback
+- Optional/auto **structured entity extraction** (person/company) via a cheap OpenRouter chat model
 - Dynamic provider selection from currently available keys/URLs
 - Providers: SearXNG, Brave, Serper, SerpAPI, Tavily, Firecrawl, Scrapingdog, Trafilatura, Crawl4AI
 - Bearer API-key auth, Redis cache, request logs to stdout
@@ -28,12 +29,46 @@ Local debug port defaults to `127.0.0.1:18100` (container still listens on `8000
 
 All `/v1/*` require `Authorization: Bearer <key>` when `API_KEYS` is set.
 
-- `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10 }`
+- `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10, "structured?": true|false|null }`
 - `POST /v1/scrape` — `{ "url": "https://...", "formats": ["markdown"] }`
 - `GET /v1/capabilities`
 - `GET /v1/usage` — provider counters + OpenRouter cost (all-time and today UTC)
 - `GET /health` (no auth)
 - `GET /ready`
+
+### Structured response (`structured`)
+
+After providers return hits, a cheap OpenRouter model can normalize them into a single entity object on `structured`:
+
+| `structured` | Behavior |
+|---|---|
+| omitted / `null` | **auto**: on for `person_search` / `company_search`, off otherwise |
+| `true` | force (works for web too) |
+| `false` | never run |
+
+Model: `STRUCTURE_MODEL` (default `google/gemini-2.5-flash-lite`). Uses the same `OPENROUTER_API_KEY`. Failure is soft — search hits still return; see `meta.structure_error`.
+
+Example person payload:
+
+```json
+{
+  "structured": {
+    "kind": "person",
+    "name": "Grigoriy Dobryakov",
+    "headline": "Head of AI Engineering",
+    "organization": "",
+    "role": "Head of AI Engineering",
+    "location": "",
+    "linkedin_url": "",
+    "website": "https://www.dobryakov.net/",
+    "summary": "...",
+    "confidence": 0.82,
+    "evidence_urls": ["https://www.dobryakov.net/"]
+  }
+}
+```
+
+Company uses `kind: "company"` (`name`, `domain`, `industry`, `headquarters`, `linkedin_url`, …). OpenRouter intent + structure costs are summed in `usage.openrouter` (`parts` lists each call).
 
 ## MCP
 
@@ -75,6 +110,11 @@ After `401/402/403/429` (or quota/auth-like error text), a provider is skipped f
 
 `scrapingdog_google` (`/google`) is registered only as the **last** `web_search` provider.  
 Person/company flows try specialized providers first, then the rest of `web_search`, and only then Scrapingdog Google. It is never used as an early internal fallback from LinkedIn people/company search.
+
+`scrapingdog_people` calls LinkedIn people search only when the query parses to a real person name (skips role queries like “who is the CTO of …”).  
+`scrapingdog_company` uses Profile API `GET /profile/?type=company&id=<linkedin_slug>` (docs example is by LinkedIn universal name like `amazon`, **not** free-text name search). Expensive (~50 credits) — runs only after cheaper company/web providers, just before `scrapingdog_google`. Skips when no slug/URL can be derived.
+
+`search_and_scrape` is a composite of available `web_search` + `scrape` providers (no dedicated provider class).
 
 ### Cursor (`~/.cursor/mcp.json` or project `.cursor/mcp.json`)
 

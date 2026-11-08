@@ -85,3 +85,72 @@ def test_capabilities_availability():
     names = {p.name: p.available for p in web.providers}
     assert names["missing"] is False
     assert names["ok"] is True
+
+
+class _CompanyCheap(BaseProvider):
+    name = "serper_company"
+    capability = "company_search"
+    priority = 40
+    cost = 25
+
+    def available(self) -> bool:
+        return True
+
+    async def run(self, request: ProviderRequest) -> ProviderResponse:
+        raise RuntimeError("cheap failed")
+
+
+class _ScrapingdogCompany(BaseProvider):
+    name = "scrapingdog_company"
+    capability = "company_search"
+    priority = 10  # high in registry sort; manager must still defer it
+    cost = 50
+
+    def available(self) -> bool:
+        return True
+
+    async def run(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            results=[SearchResultItem(title="C", url="https://c.example", snippet="", source=self.name)]
+        )
+
+
+class _WebCheap(BaseProvider):
+    name = "searxng"
+    capability = "web_search"
+    priority = 10
+    cost = 5
+
+    def available(self) -> bool:
+        return True
+
+    async def run(self, request: ProviderRequest) -> ProviderResponse:
+        raise RuntimeError("web failed")
+
+
+class _GoogleLast(BaseProvider):
+    name = "scrapingdog_google"
+    capability = "web_search"
+    priority = 100
+    cost = 100
+
+    def available(self) -> bool:
+        return True
+
+    async def run(self, request: ProviderRequest) -> ProviderResponse:
+        raise RuntimeError("google should not run")
+
+
+@pytest.mark.asyncio
+async def test_scrapingdog_company_deferred_before_google():
+    registry = CapabilityRegistry(
+        [_ScrapingdogCompany(), _CompanyCheap(), _WebCheap(), _GoogleLast()]
+    )
+    manager = ProviderManager(registry)
+    response, used, chain, _attempts = await manager.execute(
+        "company_search",
+        ProviderRequest(query="amazon", limit=5),
+    )
+    assert used == "scrapingdog_company"
+    assert chain == ["serper_company", "searxng", "scrapingdog_company"]
+    assert response.results[0].source == "scrapingdog_company"

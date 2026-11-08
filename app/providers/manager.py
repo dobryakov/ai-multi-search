@@ -61,6 +61,10 @@ class ProviderManager:
         request: ProviderRequest,
     ) -> tuple[ProviderResponse, str | None, list[str], list[dict[str, Any]]]:
         providers = self.registry.providers_for(capability, only_available=True)
+        # Expensive Scrapingdog company Profile API (~50 credits): keep after cheaper
+        # specialized + web_search, still before absolute-last scrapingdog_google.
+        deferred_company = [p for p in providers if p.name == "scrapingdog_company"]
+        providers = [p for p in providers if p.name != "scrapingdog_company"]
         # For person/company: after specialized providers, continue into cheaper web_search
         # providers and only then last-resort scrapingdog_google.
         if capability in {"person_search", "company_search"}:
@@ -69,6 +73,15 @@ class ProviderManager:
                 if provider.name not in seen:
                     providers.append(provider)
                     seen.add(provider.name)
+        if deferred_company:
+            google_idx = next(
+                (i for i, p in enumerate(providers) if p.name == "scrapingdog_google"),
+                None,
+            )
+            if google_idx is None:
+                providers.extend(deferred_company)
+            else:
+                providers[google_idx:google_idx] = deferred_company
 
         chain: list[str] = []
         attempts: list[dict[str, Any]] = []

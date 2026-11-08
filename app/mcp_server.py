@@ -42,10 +42,20 @@ def create_mcp() -> FastMCP:
         limit: int = 10,
         language: str | None = None,
         country: str | None = None,
+        structured: bool | None = None,
     ) -> dict[str, Any]:
-        """Search the internet. Intent is classified automatically (LLM then heuristics)."""
+        """Search the internet. Intent is classified automatically (LLM then heuristics).
+
+        structured: null=auto (on for person/company), true/false to force.
+        """
         resp = await _svc().search(
-            SearchRequest(query=query, limit=limit, language=language, country=country),
+            SearchRequest(
+                query=query,
+                limit=limit,
+                language=language,
+                country=country,
+                structured=structured,
+            ),
             api_key_hint="mcp",
         )
         return resp.model_dump(mode="json")
@@ -56,6 +66,7 @@ def create_mcp() -> FastMCP:
         limit: int = 10,
         language: str | None = None,
         country: str | None = None,
+        structured: bool | None = None,
     ) -> dict[str, Any]:
         """Explicit web search (skips LLM intent classification)."""
         resp = await _svc().search(
@@ -65,25 +76,44 @@ def create_mcp() -> FastMCP:
                 limit=limit,
                 language=language,
                 country=country,
+                structured=structured,
             ),
             api_key_hint="mcp",
         )
         return resp.model_dump(mode="json")
 
     @server.tool()
-    async def search_person(query: str, limit: int = 10) -> dict[str, Any]:
-        """Search for a person."""
+    async def search_person(
+        query: str,
+        limit: int = 10,
+        structured: bool | None = None,
+    ) -> dict[str, Any]:
+        """Search for a person (structured entity extraction on by default)."""
         resp = await _svc().search(
-            SearchRequest(query=query, type="person_search", limit=limit),
+            SearchRequest(
+                query=query,
+                type="person_search",
+                limit=limit,
+                structured=structured,
+            ),
             api_key_hint="mcp",
         )
         return resp.model_dump(mode="json")
 
     @server.tool()
-    async def search_company(query: str, limit: int = 10) -> dict[str, Any]:
-        """Search for a company/organization."""
+    async def search_company(
+        query: str,
+        limit: int = 10,
+        structured: bool | None = None,
+    ) -> dict[str, Any]:
+        """Search for a company/organization (structured entity extraction on by default)."""
         resp = await _svc().search(
-            SearchRequest(query=query, type="company_search", limit=limit),
+            SearchRequest(
+                query=query,
+                type="company_search",
+                limit=limit,
+                structured=structured,
+            ),
             api_key_hint="mcp",
         )
         return resp.model_dump(mode="json")

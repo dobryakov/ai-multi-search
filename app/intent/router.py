@@ -10,6 +10,7 @@ import httpx
 
 from app.config import Settings, get_settings
 from app.normalize.schema import CapabilityName
+from app.providers.person_name import extract_person_name
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,17 @@ class IntentRouter:
     async def route(self, query: str, explicit_type: CapabilityName | None = None) -> IntentDecision:
         q = query.strip()
         if explicit_type:
+            entities: dict[str, Any] = {}
+            normalized = q
+            if explicit_type == "person_search":
+                parsed = extract_person_name(q)
+                if parsed:
+                    normalized = f"{parsed[0]} {parsed[1]}".strip()
+                    entities["person_name"] = {"first_name": parsed[0], "last_name": parsed[1]}
             return IntentDecision(
                 capability=explicit_type,
-                normalized_query=q,
+                normalized_query=normalized,
+                entities=entities,
                 confidence=1.0,
                 source="explicit",
             )
@@ -140,13 +149,19 @@ class IntentRouter:
                     openrouter_usage=openrouter_usage,
                 )
             confidence = float(answer.get("confidence", 0.0))
-            entities: dict[str, Any] = {"probabilities": answer.get("probabilities") or {}}
+            entities = {"probabilities": answer.get("probabilities") or {}}
             urls = URL_RE.findall(query)
             if urls:
                 entities["url"] = urls[0]
+            normalized = urls[0] if capability == "scrape" and urls else query
+            if capability == "person_search":
+                parsed = extract_person_name(query)
+                if parsed:
+                    normalized = f"{parsed[0]} {parsed[1]}".strip()
+                    entities["person_name"] = {"first_name": parsed[0], "last_name": parsed[1]}
             return IntentDecision(
                 capability=capability,  # type: ignore[arg-type]
-                normalized_query=urls[0] if capability == "scrape" and urls else query,
+                normalized_query=normalized,
                 entities=entities,
                 confidence=max(0.0, min(1.0, confidence)),
                 source="llm",
@@ -181,9 +196,16 @@ class IntentRouter:
                 source="heuristic",
             )
         if any(h in lowered for h in PERSON_HINTS):
+            entities: dict[str, Any] = {}
+            normalized = query
+            parsed = extract_person_name(query)
+            if parsed:
+                normalized = f"{parsed[0]} {parsed[1]}".strip()
+                entities["person_name"] = {"first_name": parsed[0], "last_name": parsed[1]}
             return IntentDecision(
                 capability="person_search",
-                normalized_query=query,
+                normalized_query=normalized,
+                entities=entities,
                 confidence=0.6,
                 source="heuristic",
             )

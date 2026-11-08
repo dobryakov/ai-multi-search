@@ -21,6 +21,11 @@ from app.normalize.schema import (
 from app.providers.base import ProviderRequest
 from app.providers.cooldown import ProviderCooldownout, get_provider_cooldown
 from app.providers.manager import ProviderManager, build_default_manager
+from app.structure.extractor import (
+    StructureExtractor,
+    merge_openrouter_usage,
+    want_structured,
+)
 from app.usage.tracker import UsageTracker, get_usage_tracker
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,7 @@ class SearchService:
             self.cooldown = manager.cooldown
         self.intent = intent or IntentRouter(self.settings)
         self.cache = cache or get_cache()
+        self.structure = StructureExtractor(self.settings)
 
     async def capabilities(self) -> CapabilitiesResponse:
         desc = self.manager.registry.describe()
@@ -82,6 +88,7 @@ class SearchService:
     def _openrouter_block(raw: dict[str, Any] | None) -> OpenRouterRequestUsage | None:
         if not raw:
             return None
+        parts = raw.get("parts")
         return OpenRouterRequestUsage(
             model=raw.get("model"),
             ok=bool(raw.get("ok", True)),
@@ -90,6 +97,8 @@ class SearchService:
             cost_usd=float(raw.get("cost_usd") or 0.0),
             id=raw.get("id"),
             error=raw.get("error"),
+            purpose=raw.get("purpose"),
+            parts=parts if isinstance(parts, list) else None,
         )
 
     @staticmethod
@@ -169,6 +178,7 @@ class SearchService:
         if req.scrape and capability == "web_search":
             capability = "search_and_scrape"
 
+        do_structure = want_structured(req.structured, capability)
         cache_params = {
             "limit": req.limit,
             "language": req.language,
@@ -176,6 +186,7 @@ class SearchService:
             "scrape": req.scrape,
             "formats": req.formats,
             "type": req.type,
+            "structured": do_structure,
         }
         cache_key = self.cache.make_key(capability, decision.normalized_query, cache_params)
         cached = await self.cache.get_json(cache_key)
@@ -187,15 +198,21 @@ class SearchService:
                 a.model_dump() if hasattr(a, "model_dump") else a
                 for a in (response.usage.providers if response.usage else [])
             ] or list(response.meta.get("provider_attempts") or [])
+            combined_or = merge_openrouter_usage(
+                decision.openrouter_usage,
+                response.meta.get("structure_usage") if isinstance(response.meta, dict) else None,
+            )
             response.meta = {
+                **(response.meta or {}),
                 "intent_source": decision.source,
                 "confidence": decision.confidence,
                 "cache_hit": True,
+                "structured": bool(response.structured),
             }
             response.usage = self._build_usage(
                 provider_used=response.provider_used,
                 attempts=prior_attempts,
-                openrouter_raw=decision.openrouter_usage,
+                openrouter_raw=combined_or or decision.openrouter_usage,
                 cache_hit=True,
                 latency_ms=latency_ms,
             )
@@ -208,12 +225,13 @@ class SearchService:
                 latency_ms=latency_ms,
                 status="ok",
                 api_key_hint=api_key_hint,
-                openrouter_usage=decision.openrouter_usage,
+                openrouter_usage=combined_or or decision.openrouter_usage,
                 provider_attempts=prior_attempts,
             )
             return response
 
         provider_attempts: list[dict[str, Any]] = []
+        structure_usage: dict[str, Any] | None = None
         try:
             if capability == "scrape":
                 url = str(decision.entities.get("url") or decision.normalized_query)
@@ -258,11 +276,25 @@ class SearchService:
                     },
                 )
 
+            if do_structure and response.results and capability != "scrape":
+                structured, structure_usage = await self.structure.extract(
+                    query=decision.normalized_query or req.query,
+                    capability=capability,
+                    results=response.results,
+                )
+                response.structured = structured
+                await self._record_openrouter(structure_usage)
+                response.meta["structured"] = bool(structured)
+                response.meta["structure_usage"] = structure_usage
+                if structure_usage and structure_usage.get("error") and not structured:
+                    response.meta["structure_error"] = structure_usage.get("error")
+
+            combined_or = merge_openrouter_usage(decision.openrouter_usage, structure_usage)
             latency_ms = (time.perf_counter() - started) * 1000
             response.usage = self._build_usage(
                 provider_used=response.provider_used,
                 attempts=provider_attempts,
-                openrouter_raw=decision.openrouter_usage,
+                openrouter_raw=combined_or,
                 cache_hit=False,
                 latency_ms=latency_ms,
             )
@@ -277,7 +309,7 @@ class SearchService:
                 latency_ms=latency_ms,
                 status=status,
                 api_key_hint=api_key_hint,
-                openrouter_usage=decision.openrouter_usage,
+                openrouter_usage=combined_or,
                 provider_attempts=provider_attempts,
             )
             return response
@@ -292,7 +324,7 @@ class SearchService:
                 status="error",
                 api_key_hint=api_key_hint,
                 error=str(exc),
-                openrouter_usage=decision.openrouter_usage,
+                openrouter_usage=merge_openrouter_usage(decision.openrouter_usage, structure_usage),
                 provider_attempts=provider_attempts,
             )
             raise
