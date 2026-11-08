@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     # Cheap OpenRouter chat model for post-search entity structuring.
     structure_model: str = "google/gemini-2.5-flash-lite"
     structure_timeout_seconds: float = 15.0
+    # Company enrich fan-out (engage research): hits per facet + delay between SERPs.
+    enrich_facet_limit: int = 3
+    enrich_facet_delay_ms: int = 300
 
     # Provider keys / URLs
     searxng_url: str = ""

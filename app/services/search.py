@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
 
 from app.cache.redis import Cache, get_cache
 from app.config import Settings, get_settings
+from app.enrich.company_facets import (
+    ENRICH_PURPOSE,
+    build_facet_queries,
+    company_name_for_facets,
+    facet_meta_entry,
+    merge_primary_and_facet_hits,
+)
 from app.intent.router import IntentRouter
 from app.normalize.schema import (
     CapabilitiesResponse,
@@ -19,6 +27,7 @@ from app.normalize.schema import (
     ScrapeResult,
     SearchRequest,
     SearchResponse,
+    SearchResultItem,
 )
 from app.providers.base import ProviderRequest
 from app.providers.cooldown import (
@@ -194,6 +203,7 @@ class SearchService:
             capability = "search_and_scrape"
 
         do_structure = want_structured(req.structured, capability)
+        do_enrich = bool(req.enrich) and capability == "company_search"
         cache_params = {
             "limit": req.limit,
             "language": req.language,
@@ -202,6 +212,7 @@ class SearchService:
             "formats": req.formats,
             "type": req.type,
             "structured": do_structure,
+            "enrich": do_enrich,
         }
         cache_key = self.cache.make_key(capability, decision.normalized_query, cache_params)
         cached = await self.cache.get_json(cache_key)
@@ -290,12 +301,30 @@ class SearchService:
                         "errors": raw.raw.get("errors"),
                     },
                 )
+                if do_enrich:
+                    enrich_out = await self._enrich_company_facets(
+                        company_query=decision.normalized_query or req.query,
+                        primary=list(response.results),
+                        language=req.language,
+                        country=req.country,
+                    )
+                    response.results = enrich_out["results"]
+                    response.meta["enrich"] = True
+                    response.meta["enrich_purpose"] = ENRICH_PURPOSE
+                    response.meta["facets"] = enrich_out["facets"]
+                    response.meta["enrich_facet_limit"] = enrich_out["enrich_facet_limit"]
+                    provider_attempts.extend(enrich_out["attempts"])
+                    if enrich_out["fallback_chain"]:
+                        response.fallback_chain = list(response.fallback_chain) + list(
+                            enrich_out["fallback_chain"]
+                        )
 
             if do_structure and response.results and capability != "scrape":
                 structured, structure_usage = await self.structure.extract(
                     query=decision.normalized_query or req.query,
                     capability=capability,
                     results=response.results,
+                    enrich=do_enrich,
                 )
                 response.structured = structured
                 await self._record_openrouter(structure_usage)
@@ -605,6 +634,77 @@ class SearchService:
             "fallback_chain": chain,
             "results": raw.scrape_results,
             "attempts": attempts,
+        }
+
+    async def _enrich_company_facets(
+        self,
+        *,
+        company_query: str,
+        primary: list[SearchResultItem],
+        language: str | None,
+        country: str | None,
+    ) -> dict[str, Any]:
+        """Sequential engage-research facet SERPs with a short delay (soft-fail per facet)."""
+        name = company_name_for_facets(company_query)
+        facet_limit = max(1, int(self.settings.enrich_facet_limit or 3))
+        delay_ms = max(0, int(self.settings.enrich_facet_delay_ms or 0))
+        facet_batches: list[tuple[str, list[SearchResultItem]]] = []
+        facet_meta: list[dict[str, Any]] = []
+        attempts: list[dict[str, Any]] = []
+        chains: list[str] = []
+
+        queries = build_facet_queries(name)
+        for index, (facet_id, facet_query) in enumerate(queries):
+            if index > 0 and delay_ms:
+                await asyncio.sleep(delay_ms / 1000.0)
+            try:
+                raw, _used, chain, facet_attempts = await self.manager.execute(
+                    "web_search",
+                    ProviderRequest(
+                        query=facet_query,
+                        limit=facet_limit,
+                        language=language,
+                        country=country,
+                    ),
+                )
+                hits = list(raw.results or [])[:facet_limit]
+                facet_batches.append((facet_id, hits))
+                facet_meta.append(
+                    facet_meta_entry(
+                        facet_id=facet_id,
+                        query=facet_query,
+                        hit_count=len(hits),
+                    )
+                )
+                attempts.extend(facet_attempts)
+                chains.extend(chain)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("company enrich facet %s failed: %s", facet_id, exc)
+                facet_batches.append((facet_id, []))
+                facet_meta.append(
+                    facet_meta_entry(
+                        facet_id=facet_id,
+                        query=facet_query,
+                        hit_count=0,
+                        error=str(exc)[:300],
+                    )
+                )
+                attempts.append(
+                    {
+                        "provider": "enrich_facet",
+                        "outcome": "error",
+                        "latency_ms": 0.0,
+                        "error": f"{facet_id}:{exc}"[:300],
+                    }
+                )
+
+        return {
+            "results": merge_primary_and_facet_hits(primary, facet_batches),
+            "facets": facet_meta,
+            "enrich_facet_limit": facet_limit,
+            "attempts": attempts,
+            "fallback_chain": chains,
+            "company_name": name,
         }
 
     async def _search_and_scrape(

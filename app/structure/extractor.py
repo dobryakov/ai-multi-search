@@ -44,6 +44,20 @@ _COMPANY_SCHEMA = {
     "evidence_urls": [],
 }
 
+# Additive fields when enrich=true (engage: employee + contractor).
+_COMPANY_ENRICH_FIELDS = {
+    "culture": "",
+    "hiring": "",
+    "funding": [],
+    "vendor_engagement": "",
+    "initiatives": [],
+    "pros": [],
+    "cons": [],
+    "career_pages": [],
+    "partner_pages": [],
+    "enrichment_summary": "",
+}
+
 _WEB_SCHEMA = {
     "kind": "web",
     "answer_summary": "",
@@ -62,12 +76,42 @@ def want_structured(structured: bool | None, capability: CapabilityName) -> bool
     return capability in {"person_search", "company_search"}
 
 
-def _schema_for(capability: CapabilityName) -> dict[str, Any]:
+def _schema_for(capability: CapabilityName, *, enrich: bool = False) -> dict[str, Any]:
     if capability == "person_search":
         return dict(_PERSON_SCHEMA)
     if capability == "company_search":
-        return dict(_COMPANY_SCHEMA)
+        schema = dict(_COMPANY_SCHEMA)
+        if enrich:
+            schema.update({k: (list(v) if isinstance(v, list) else v) for k, v in _COMPANY_ENRICH_FIELDS.items()})
+        return schema
     return dict(_WEB_SCHEMA)
+
+
+def _select_hits_for_structure(
+    results: list[SearchResultItem],
+    *,
+    enrich: bool,
+) -> list[dict[str, Any]]:
+    """Prefer primary hits, then facet-tagged ones so enrich evidence is not crowded out."""
+    if not enrich:
+        items = results[:8]
+    else:
+        primary = [r for r in results if not (r.extra or {}).get("facet")]
+        facets = [r for r in results if (r.extra or {}).get("facet")]
+        items = primary[:8] + facets[:12]
+    hits: list[dict[str, Any]] = []
+    for item in items:
+        hit: dict[str, Any] = {
+            "title": item.title,
+            "url": item.url,
+            "snippet": (item.snippet or "")[:400],
+            "source": item.source,
+        }
+        facet = (item.extra or {}).get("facet")
+        if facet:
+            hit["facet"] = facet
+        hits.append(hit)
+    return hits
 
 
 def _chat_url(settings: Settings) -> str:
@@ -108,6 +152,7 @@ class StructureExtractor:
         query: str,
         capability: CapabilityName,
         results: list[SearchResultItem],
+        enrich: bool = False,
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """Return (structured_payload_or_None, openrouter_usage)."""
         usage: dict[str, Any] = {
@@ -128,17 +173,9 @@ class StructureExtractor:
             usage["error"] = "no results to structure"
             return None, usage
 
-        schema = _schema_for(capability)
-        hits = []
-        for item in results[:8]:
-            hits.append(
-                {
-                    "title": item.title,
-                    "url": item.url,
-                    "snippet": (item.snippet or "")[:400],
-                    "source": item.source,
-                }
-            )
+        do_enrich = bool(enrich) and capability == "company_search"
+        schema = _schema_for(capability, enrich=do_enrich)
+        hits = _select_hits_for_structure(results, enrich=do_enrich)
         system = (
             "You extract structured facts from search results. "
             "Return ONLY a JSON object matching the provided template. "
@@ -150,9 +187,18 @@ class StructureExtractor:
             "(not a country microsite or random hit) when several are present. "
             "Do not invent facts that are not supported by the hits."
         )
+        if do_enrich:
+            system += (
+                " Hits may include a facet tag (culture, hiring, funding, vendors, initiatives). "
+                "Fill enrichment fields for someone evaluating the company as an employee hire "
+                "or as a contractor/consultant. Do not invent funding figures. "
+                "Distinguish employee vs contractor signals when present. "
+                "enrichment_summary: 2-4 sentences on fit for hire vs contract engagement."
+            )
         user = {
             "query": query,
             "capability": capability,
+            "enrich": do_enrich,
             "template": schema,
             "hits": hits,
         }
@@ -164,7 +210,7 @@ class StructureExtractor:
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.1,
-            "max_tokens": 700,
+            "max_tokens": 1200 if do_enrich else 700,
         }
         api_key = self.settings.resolved_llm_api_key()
         try:

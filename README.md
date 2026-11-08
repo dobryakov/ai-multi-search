@@ -7,6 +7,7 @@ Capability-based multi-provider internet search microservice with HTTP API and M
 - Extensible capabilities: `web_search`, `person_search`, `company_search`, `scrape`, `search_and_scrape`, plus forced `linkedin_profile`
 - Intent routing: cheap LLM (OpenAI-compatible) with soft heuristic fallback
 - Optional/auto **structured entity extraction** (person/company) via a cheap OpenRouter chat model
+- Opt-in **company enrich** (`enrich: true`): sequential engage-research facets (culture/hiring/funding/vendors/initiatives)
 - Dynamic provider selection from currently available keys/URLs
 - Providers: SearXNG, Brave, Serper, SerpAPI, Tavily, Firecrawl, Scrapingdog, Trafilatura, Crawl4AI
 - Bearer API-key auth, Redis cache, request logs to stdout
@@ -29,7 +30,7 @@ Local debug port defaults to `127.0.0.1:18100` (container still listens on `8000
 
 All `/v1/*` require `Authorization: Bearer <key>` when `API_KEYS` is set.
 
-- `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10, "structured?": true|false|null }`
+- `POST /v1/search` — `{ "query": "...", "type?": "web_search|person_search|...", "limit": 10, "structured?": true|false|null, "enrich?": false }`
 - `POST /v1/scrape` — `{ "url": "https://...", "formats": ["markdown"] }`
 - `POST /v1/linkedin/profile` — forced Scrapingdog Profile API (see below)
 - `GET /v1/capabilities`
@@ -70,6 +71,20 @@ Example person payload:
 ```
 
 Company uses `kind: "company"` (`name`, `domain`, `industry`, `headquarters`, `linkedin_url`, …). OpenRouter intent + structure costs are summed in `usage.openrouter` (`parts` lists each call).
+
+### Company enrich (`enrich`)
+
+Opt-in engage research for `company_search` only (`enrich: true`, default **false**). After the primary company lookup, runs fixed EN facet SERPs **sequentially** (short delay between calls) for:
+
+| facet | focus |
+|---|---|
+| `culture` | culture / values / WLB |
+| `hiring` | interview / careers |
+| `funding` | funding / investment / valuation |
+| `vendors` | contractors / consultants / professional services |
+| `initiatives` | RFP / procurement / transformation / consulting engagements |
+
+`limit` applies only to the primary lookup; each facet uses `ENRICH_FACET_LIMIT` (default 3). Merged `results` may exceed `limit` (primary first, then facet hits tagged with `extra.facet`). Structure extraction gets extra fields (`culture`, `hiring`, `funding`, `vendor_engagement`, `initiatives`, `pros`/`cons`, …). See `meta.enrich`, `meta.facets`.
 
 ## MCP
 

@@ -48,10 +48,12 @@ def create_mcp() -> FastMCP:
         language: str | None = None,
         country: str | None = None,
         structured: bool | None = None,
+        enrich: bool = False,
     ) -> dict[str, Any]:
         """Search the internet. Intent is classified automatically (LLM then heuristics).
 
         structured: null=auto (on for person/company), true/false to force.
+        enrich: engage research fan-out for company_search (default false).
         """
         resp = await _svc().search(
             SearchRequest(
@@ -60,6 +62,7 @@ def create_mcp() -> FastMCP:
                 language=language,
                 country=country,
                 structured=structured,
+                enrich=enrich,
             ),
             api_key_hint="mcp",
         )
@@ -110,14 +113,19 @@ def create_mcp() -> FastMCP:
         query: str,
         limit: int = 10,
         structured: bool | None = None,
+        enrich: bool = False,
     ) -> dict[str, Any]:
-        """Search for a company/organization (structured entity extraction on by default)."""
+        """Search for a company/organization (structured entity extraction on by default).
+
+        enrich: sequential engage-research facets (culture/hiring/funding/vendors/initiatives).
+        """
         resp = await _svc().search(
             SearchRequest(
                 query=query,
                 type="company_search",
                 limit=limit,
                 structured=structured,
+                enrich=enrich,
             ),
             api_key_hint="mcp",
         )

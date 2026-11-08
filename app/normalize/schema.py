@@ -22,6 +22,8 @@ class SearchRequest(BaseModel):
     formats: list[str] = Field(default_factory=lambda: ["markdown"])
     # None = auto (on for person_search/company_search). True/False force.
     structured: bool | None = None
+    # Opt-in engage research fan-out (company_search only). Default off.
+    enrich: bool = False
 
 
 class ScrapeRequest(BaseModel):
