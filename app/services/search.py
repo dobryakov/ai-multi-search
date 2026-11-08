@@ -19,6 +19,7 @@ from app.normalize.schema import (
     SearchResponse,
 )
 from app.providers.base import ProviderRequest
+from app.providers.cooldown import ProviderCooldownout, get_provider_cooldown
 from app.providers.manager import ProviderManager, build_default_manager
 from app.usage.tracker import UsageTracker, get_usage_tracker
 
@@ -36,12 +37,32 @@ class SearchService:
     ) -> None:
         self.settings = settings or get_settings()
         self.usage = usage or get_usage_tracker()
-        self.manager = manager or build_default_manager(self.settings, usage=self.usage)
+        if manager is None:
+            self.cooldown = get_provider_cooldown()
+            self.manager = build_default_manager(
+                self.settings, usage=self.usage, cooldown=self.cooldown
+            )
+        else:
+            self.manager = manager
+            self.cooldown = manager.cooldown
         self.intent = intent or IntentRouter(self.settings)
         self.cache = cache or get_cache()
 
-    def capabilities(self) -> CapabilitiesResponse:
-        return self.manager.registry.describe()
+    async def capabilities(self) -> CapabilitiesResponse:
+        desc = self.manager.registry.describe()
+        cooling = await self.cooldown.active_map()
+        for cap in desc.capabilities:
+            for provider in cap.providers:
+                info = cooling.get(provider.name)
+                if not info:
+                    continue
+                provider.cooldown = True
+                provider.cooldown_remaining_seconds = int(info.get("remaining_seconds") or 0)
+                provider.cooldown_reason = info.get("reason")
+                provider.available = False
+            # Capability is live if any configured provider is not cooling down.
+            cap.available = any(p.available for p in cap.providers)
+        return desc
 
     async def usage_snapshot(self) -> dict[str, Any]:
         return await self.usage.snapshot()
@@ -76,7 +97,7 @@ class SearchService:
         out: list[ProviderAttemptUsage] = []
         for item in attempts or []:
             outcome = item.get("outcome") or "error"
-            if outcome not in {"ok", "empty", "error"}:
+            if outcome not in {"ok", "empty", "error", "skipped_cooldown"}:
                 outcome = "error"
             out.append(
                 ProviderAttemptUsage(
@@ -84,6 +105,9 @@ class SearchService:
                     outcome=outcome,  # type: ignore[arg-type]
                     latency_ms=float(item.get("latency_ms") or 0.0),
                     error=item.get("error"),
+                    cooldown_remaining_seconds=item.get("cooldown_remaining_seconds"),
+                    endpoint=item.get("endpoint"),
+                    endpoint_attempts=item.get("endpoint_attempts"),
                 )
             )
         return out

@@ -8,6 +8,11 @@ from app.capabilities.registry import CapabilityRegistry
 from app.config import Settings, get_settings
 from app.normalize.schema import CapabilityName, SearchResultItem
 from app.providers.base import BaseProvider, ProviderRequest, ProviderResponse
+from app.providers.cooldown import (
+    ProviderCooldownout,
+    cooldown_reason_from_error,
+    get_provider_cooldown,
+)
 from app.providers.person_scrapingdog import ScrapingdogCompanyProvider, ScrapingdogPeopleProvider
 from app.providers.scrape_crawl4ai import Crawl4AIProvider
 from app.providers.scrape_trafilatura import TrafilaturaProvider
@@ -17,6 +22,7 @@ from app.providers.web_firecrawl import (
     FirecrawlScrapeProvider,
     FirecrawlSearchProvider,
 )
+from app.providers.web_scrapingdog_google import ScrapingdogGoogleProvider
 from app.providers.web_searxng import SearxngProvider
 from app.providers.web_serpapi import SerpApiCompanyProvider, SerpApiPersonProvider, SerpApiProvider
 from app.providers.web_serper import SerperCompanyProvider, SerperPersonProvider, SerperProvider
@@ -43,9 +49,11 @@ class ProviderManager:
         self,
         registry: CapabilityRegistry,
         usage: UsageTracker | None = None,
+        cooldown: ProviderCooldownout | None = None,
     ) -> None:
         self.registry = registry
         self.usage = usage or get_usage_tracker()
+        self.cooldown = cooldown or get_provider_cooldown()
 
     async def execute(
         self,
@@ -53,13 +61,33 @@ class ProviderManager:
         request: ProviderRequest,
     ) -> tuple[ProviderResponse, str | None, list[str], list[dict[str, Any]]]:
         providers = self.registry.providers_for(capability, only_available=True)
-        if not providers and capability in {"person_search", "company_search"}:
-            providers = self.registry.providers_for("web_search", only_available=True)
+        # For person/company: after specialized providers, continue into cheaper web_search
+        # providers and only then last-resort scrapingdog_google.
+        if capability in {"person_search", "company_search"}:
+            seen = {p.name for p in providers}
+            for provider in self.registry.providers_for("web_search", only_available=True):
+                if provider.name not in seen:
+                    providers.append(provider)
+                    seen.add(provider.name)
 
         chain: list[str] = []
         attempts: list[dict[str, Any]] = []
         errors: list[str] = []
         for provider in providers:
+            cooling = await self.cooldown.get(provider.name)
+            if cooling:
+                chain.append(provider.name)
+                attempts.append(
+                    {
+                        "provider": provider.name,
+                        "outcome": "skipped_cooldown",
+                        "latency_ms": 0.0,
+                        "cooldown_remaining_seconds": cooling.get("remaining_seconds"),
+                        "error": f"cooldown:{cooling.get('reason')}",
+                    }
+                )
+                continue
+
             chain.append(provider.name)
             started = time.perf_counter()
             try:
@@ -75,13 +103,17 @@ class ProviderManager:
                     outcome=outcome,
                     latency_ms=latency_ms,
                 )
-                attempts.append(
-                    {
-                        "provider": provider.name,
-                        "outcome": outcome,
-                        "latency_ms": round(latency_ms, 1),
-                    }
-                )
+                attempt: dict[str, Any] = {
+                    "provider": provider.name,
+                    "outcome": outcome,
+                    "latency_ms": round(latency_ms, 1),
+                }
+                if isinstance(response.raw, dict):
+                    if response.raw.get("endpoint"):
+                        attempt["endpoint"] = response.raw.get("endpoint")
+                    if response.raw.get("endpoint_attempts"):
+                        attempt["endpoint_attempts"] = response.raw.get("endpoint_attempts")
+                attempts.append(attempt)
                 if ok:
                     if capability != "scrape":
                         response.results = dedupe_results(response.results)[: request.limit]
@@ -95,14 +127,24 @@ class ProviderManager:
                     outcome="error",
                     latency_ms=latency_ms,
                 )
-                attempts.append(
-                    {
-                        "provider": provider.name,
-                        "outcome": "error",
-                        "latency_ms": round(latency_ms, 1),
-                        "error": str(exc)[:300],
-                    }
-                )
+                reason = cooldown_reason_from_error(exc)
+                cooldown_remaining = None
+                if reason:
+                    cooldown_remaining = await self.cooldown.mark(provider.name, reason)
+                err_attempt: dict[str, Any] = {
+                    "provider": provider.name,
+                    "outcome": "error",
+                    "latency_ms": round(latency_ms, 1),
+                    "error": str(exc)[:300],
+                    "cooldown_remaining_seconds": cooldown_remaining or None,
+                }
+                endpoint = getattr(exc, "endpoint", None)
+                endpoint_attempts = getattr(exc, "endpoint_attempts", None)
+                if endpoint:
+                    err_attempt["endpoint"] = endpoint
+                if endpoint_attempts:
+                    err_attempt["endpoint_attempts"] = endpoint_attempts
+                attempts.append(err_attempt)
                 errors.append(f"{provider.name}: {exc}")
 
         empty = ProviderResponse()
@@ -119,6 +161,8 @@ def build_default_providers(settings: Settings | None = None) -> list[BaseProvid
         SerpApiProvider(settings),
         TavilyProvider(settings),
         FirecrawlSearchProvider(settings),
+        # Absolute last resort for web_search (expensive).
+        ScrapingdogGoogleProvider(settings),
         ScrapingdogPeopleProvider(settings),
         SerperPersonProvider(settings),
         SerpApiPersonProvider(settings),
@@ -135,9 +179,10 @@ def build_default_providers(settings: Settings | None = None) -> list[BaseProvid
 def build_default_manager(
     settings: Settings | None = None,
     usage: UsageTracker | None = None,
+    cooldown: ProviderCooldownout | None = None,
 ) -> ProviderManager:
     registry = CapabilityRegistry(build_default_providers(settings))
-    return ProviderManager(registry, usage=usage)
+    return ProviderManager(registry, usage=usage, cooldown=cooldown)
 
 
 def provider_status(registry: CapabilityRegistry) -> dict[str, Any]:

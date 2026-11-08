@@ -100,7 +100,7 @@ def create_mcp() -> FastMCP:
     @server.tool()
     async def list_capabilities() -> dict[str, Any]:
         """List currently available search capabilities and providers."""
-        return _svc().capabilities().model_dump(mode="json")
+        return (await _svc().capabilities()).model_dump(mode="json")
 
     @server.tool()
     async def get_usage() -> dict[str, Any]:

@@ -48,9 +48,12 @@ class ScrapeResult(BaseModel):
 
 class ProviderAttemptUsage(BaseModel):
     provider: str
-    outcome: Literal["ok", "empty", "error"]
+    outcome: Literal["ok", "empty", "error", "skipped_cooldown"]
     latency_ms: float = 0.0
     error: str | None = None
+    cooldown_remaining_seconds: int | None = None
+    endpoint: str | None = None
+    endpoint_attempts: list[dict[str, Any]] | None = None
 
 
 class OpenRouterRequestUsage(BaseModel):
@@ -94,6 +97,9 @@ class ProviderInfo(BaseModel):
     available: bool
     priority: int
     cost: int
+    cooldown: bool = False
+    cooldown_remaining_seconds: int = 0
+    cooldown_reason: str | None = None
 
 
 class CapabilityInfo(BaseModel):

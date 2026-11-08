@@ -27,7 +27,7 @@ async def list_capabilities(
     _: str = Depends(require_api_key),
     service: SearchService = Depends(get_search_service),
 ) -> CapabilitiesResponse:
-    return service.capabilities()
+    return await service.capabilities()
 
 
 @router.get("/usage")

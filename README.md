@@ -65,6 +65,15 @@ Each search/scrape/MCP tool response includes a top-level `usage` block for **th
 
 `cost_usd` is known billed USD for the request (OpenRouter/Jev). Provider calls are listed in `providers[]` even when the upstream API does not return a dollar amount. Aggregates: `GET /v1/usage` / MCP `get_usage`.
 
+### Provider cooldown
+
+After `401/402/403/429` (or quota/auth-like error text), a provider is skipped for `PROVIDER_COOLDOWN_SECONDS` (default 900). Status appears in `GET /v1/capabilities` (`cooldown`, `cooldown_remaining_seconds`, `cooldown_reason`) and in per-request `usage.providers[].outcome = "skipped_cooldown"`.
+
+### Scrapingdog Google (last resort)
+
+`scrapingdog_google` (`/google`) is registered only as the **last** `web_search` provider.  
+Person/company flows try specialized providers first, then the rest of `web_search`, and only then Scrapingdog Google. It is never used as an early internal fallback from LinkedIn people/company search.
+
 ### Cursor (`~/.cursor/mcp.json` or project `.cursor/mcp.json`)
 
 Local debug:

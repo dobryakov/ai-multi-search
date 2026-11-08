@@ -11,6 +11,7 @@ from app.api.routes import router as api_router
 from app.cache.redis import Cache, get_cache, set_cache
 from app.config import get_settings
 from app.mcp_server import bind_search_service, create_mcp, mcp_asgi_app
+from app.providers.cooldown import ProviderCooldownout, set_provider_cooldown
 from app.providers.manager import build_default_manager
 from app.services.search import SearchService
 from app.usage.tracker import UsageTracker, set_usage_tracker
@@ -33,16 +34,20 @@ def create_app() -> FastAPI:
 
         usage = UsageTracker(cache=cache, settings=settings)
         set_usage_tracker(usage)
+        cooldown = ProviderCooldownout(cache=cache, settings=settings)
+        set_provider_cooldown(cooldown)
 
-        manager = build_default_manager(settings, usage=usage)
+        manager = build_default_manager(settings, usage=usage, cooldown=cooldown)
         service = SearchService(manager=manager, cache=cache, usage=usage, settings=settings)
         app.state.search_service = service
         bind_search_service(service)
 
+        caps = await service.capabilities()
         logger.info(
-            "ai-multi-search ready; public_base_url=%s available_caps=%s",
+            "ai-multi-search ready; public_base_url=%s available_caps=%s cooldown_seconds=%s",
             settings.public_base_url,
-            [c.name for c in service.capabilities().capabilities if c.available],
+            [c.name for c in caps.capabilities if c.available],
+            settings.provider_cooldown_seconds,
         )
 
         async with AsyncExitStack() as stack:
@@ -73,7 +78,7 @@ def create_app() -> FastAPI:
             "redis": cache._redis is not None,
             "llm_configured": settings.llm_configured(),
             "llm_model": settings.llm_model,
-            "capabilities": service.capabilities().model_dump() if service else None,
+            "capabilities": (await service.capabilities()).model_dump() if service else None,
         }
         code = 200 if service else 503
         return JSONResponse(payload, status_code=code)

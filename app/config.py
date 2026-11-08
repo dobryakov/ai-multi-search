@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     cache_ttl_seconds: int = 900
     rate_limit_per_minute: int = 60
+    # Skip providers after 401/402/403/429 (or quota-like errors) for this many seconds.
+    provider_cooldown_seconds: int = 900
 
     # OpenRouter / Jev (Decisions API). Prefer OPENROUTER_API_KEY if LLM_API_KEY empty.
     openrouter_api_key: str = ""
