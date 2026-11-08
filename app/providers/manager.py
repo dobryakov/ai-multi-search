@@ -14,6 +14,7 @@ from app.providers.cooldown import (
     get_provider_cooldown,
 )
 from app.providers.person_scrapingdog import ScrapingdogCompanyProvider, ScrapingdogPeopleProvider
+from app.providers.person_slug import linkedin_people_query, linkedin_person_slug
 from app.providers.scrape_crawl4ai import Crawl4AIProvider
 from app.providers.scrape_trafilatura import TrafilaturaProvider
 from app.providers.web_brave import BraveSearchProvider
@@ -65,6 +66,23 @@ class ProviderManager:
         # specialized + web_search, still before absolute-last scrapingdog_google.
         deferred_company = [p for p in providers if p.name == "scrapingdog_company"]
         providers = [p for p in providers if p.name != "scrapingdog_company"]
+        # Scrapingdog has no people-by-name API. Name queries → SERP chain with
+        # site:linkedin.com/in. Explicit LinkedIn person id/URL → Profile API
+        # (scrapingdog_people, expensive) may run; still append site: for fallbacks.
+        if capability == "person_search":
+            person_slug = linkedin_person_slug(request.query)
+            extra = dict(request.extra or {})
+            if person_slug:
+                extra["linkedin_person_slug"] = person_slug
+            request = ProviderRequest(
+                query=linkedin_people_query(request.query),
+                limit=request.limit,
+                country=request.country,
+                language=request.language,
+                url=request.url,
+                formats=request.formats,
+                extra=extra,
+            )
         # For person/company: after specialized providers, continue into cheaper web_search
         # providers and only then last-resort scrapingdog_google.
         if capability in {"person_search", "company_search"}:
@@ -176,6 +194,7 @@ def build_default_providers(settings: Settings | None = None) -> list[BaseProvid
         FirecrawlSearchProvider(settings),
         # Absolute last resort for web_search (expensive).
         ScrapingdogGoogleProvider(settings),
+        # Profile-by-id only (expensive 50–100 credits); skips without LinkedIn id.
         ScrapingdogPeopleProvider(settings),
         SerperPersonProvider(settings),
         SerpApiPersonProvider(settings),

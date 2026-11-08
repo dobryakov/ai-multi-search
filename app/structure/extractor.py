@@ -144,6 +144,10 @@ class StructureExtractor:
             "Return ONLY a JSON object matching the provided template. "
             "Use empty strings / empty arrays when unknown. "
             "confidence is 0..1. Prefer LinkedIn/official sites as evidence_urls. "
+            "For linkedin_url use a profile or company page "
+            "(linkedin.com/in/... or linkedin.com/company/...), never a /posts/ URL. "
+            "For company domain prefer the primary brand website "
+            "(not a country microsite or random hit) when several are present. "
             "Do not invent facts that are not supported by the hits."
         )
         user = {

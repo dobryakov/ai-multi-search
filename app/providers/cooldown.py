@@ -10,13 +10,17 @@ import httpx
 
 from app.cache.redis import Cache, get_cache
 from app.config import Settings, get_settings
+from app.providers.errors import ProviderEndpointError
 
 logger = logging.getLogger(__name__)
 
-COOLDOWN_STATUSES = {401, 402, 403, 429}
+# Auth / quota / rate-limit of the *provider API* only.
+# Do NOT include 403: for scrape providers (trafilatura) that is usually the
+# target page, not provider auth — cooling down would disable free scrape globally.
+COOLDOWN_STATUSES = {401, 402, 429}
 QUOTA_HINTS = re.compile(
     r"(quota|rate.?limit|too many requests|insufficient|credit|payment|billing|"
-    r"exceeded|out of|plan limit|unauthorized|forbidden|subscription)",
+    r"exceeded|out of|plan limit|unauthorized|subscription)",
     re.I,
 )
 
@@ -27,8 +31,18 @@ def cooldown_reason_from_error(exc: BaseException) -> str | None:
         status = exc.response.status_code
         if status in COOLDOWN_STATUSES:
             return f"http_{status}"
+        return None
+
+    # Paid/search API returned 5xx (e.g. Scrapingdog Google HTML 500).
+    # Circuit that provider so every person_search does not keep paying a dead hop.
+    if isinstance(exc, ProviderEndpointError):
+        for attempt in exc.endpoint_attempts or []:
+            status = attempt.get("status_code")
+            if isinstance(status, int) and status >= 500:
+                return f"upstream_{status}"
+
     text = str(exc)
-    status_match = re.search(r"\b(401|402|403|429)\b", text)
+    status_match = re.search(r"\b(401|402|429)\b", text)
     if status_match:
         return f"http_{status_match.group(1)}"
     if QUOTA_HINTS.search(text):
@@ -100,6 +114,14 @@ class ProviderCooldownout:
 
     async def is_active(self, provider: str) -> bool:
         return (await self.get(provider)) is not None
+
+    async def clear(self, provider: str) -> None:
+        self._memory.pop(provider, None)
+        if self.cache._redis is not None:
+            try:
+                await self.cache._redis.delete(self._key(provider))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cooldown redis delete failed: %s", exc)
 
     async def active_map(self) -> dict[str, dict[str, Any]]:
         out: dict[str, dict[str, Any]] = {}

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
@@ -11,9 +10,7 @@ from app.providers.base import BaseProvider, ProviderRequest, ProviderResponse
 from app.providers.company_slug import linkedin_company_slug
 from app.providers.errors import ProviderEndpointError
 from app.providers.http_util import get_http_client
-from app.providers.person_name import extract_person_name
-
-logger = logging.getLogger(__name__)
+from app.providers.person_slug import linkedin_person_slug
 
 _API_KEY_RE = re.compile(r"(api_key=)[^&]+", re.I)
 
@@ -45,12 +42,18 @@ def _clean_url(url: str) -> str:
 
 
 class ScrapingdogPeopleProvider(BaseProvider):
-    """LinkedIn people search only. On failure, let cheaper providers handle web search."""
+    """Person lookup via Scrapingdog Profile API (by LinkedIn id only).
+
+    Docs: ``GET /profile/?type=profile&id=<linkedin_vanity_id>``.
+    Needs ``linkedin.com/in/<id>`` or a bare id (``rbranson``) — **not** a
+    free-text name. Expensive (**50–100 credits** per successful call).
+    Skips immediately when no id; name discovery uses the cheap SERP chain.
+    """
 
     name = "scrapingdog_people"
     capability = "person_search"
-    priority = 10
-    cost = 40
+    priority = 5
+    cost = 80
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -59,91 +62,123 @@ class ScrapingdogPeopleProvider(BaseProvider):
         return bool(self.settings.scrapingdog_api_key.strip())
 
     async def run(self, request: ProviderRequest) -> ProviderResponse:
-        parsed = extract_person_name(request.query)
-        if not parsed:
-            raise ProviderEndpointError(
-                "scrapingdog linkedin/search people skipped: "
-                "query is not a person name (need first_name + last_name)",
-                endpoint="linkedin/search",
-                endpoint_attempts=[
-                    {
-                        "endpoint": "linkedin/search",
-                        "type": "people",
-                        "skipped": True,
-                        "reason": "no_person_name",
-                        "query": request.query[:120],
-                    }
-                ],
+        slug = request.extra.get("linkedin_person_slug") or linkedin_person_slug(request.query)
+        if isinstance(slug, str):
+            slug = slug.strip() or None
+        else:
+            slug = None
+        if not slug:
+            # Not applicable to free-text names — continue SERP chain (no HTTP / credits).
+            return ProviderResponse(
+                results=[],
+                raw={
+                    "endpoint": "profile",
+                    "endpoint_attempts": [
+                        {
+                            "endpoint": "profile",
+                            "type": "profile",
+                            "skipped": True,
+                            "reason": "no_person_slug",
+                            "query": request.query[:120],
+                        }
+                    ],
+                },
             )
 
-        first_name, last_name = parsed
         params = {
             "api_key": self.settings.scrapingdog_api_key,
-            "first_name": first_name,
-            "last_name": last_name,
-            "type": "people",
+            "type": "profile",
+            "id": slug,
         }
         async with get_http_client() as client:
-            resp = await client.get(
-                "https://api.scrapingdog.com/linkedin/search",
-                params=params,
-            )
+            resp = await client.get("https://api.scrapingdog.com/profile/", params=params)
         endpoint_attempts = [
             {
-                "endpoint": "linkedin/search",
-                "type": "people",
+                "endpoint": "profile",
+                "type": "profile",
+                "id": slug,
                 "status_code": resp.status_code,
-                "first_name": first_name,
-                "last_name": last_name,
             }
         ]
         if resp.status_code >= 400:
-            # Do NOT fall back to Scrapingdog /google — it is expensive.
             detail = resp.text[:300]
             raise ProviderEndpointError(
-                f"scrapingdog linkedin/search people failed "
-                f"status={resp.status_code} body={detail}",
-                endpoint="linkedin/search",
+                f"scrapingdog profile person failed status={resp.status_code} "
+                f"id={slug!r} body={detail}",
+                endpoint="profile",
                 endpoint_attempts=endpoint_attempts,
             )
 
         data = resp.json()
+        items = data if isinstance(data, list) else [data]
         results: list[SearchResultItem] = []
-        items = (
-            data
-            if isinstance(data, list)
-            else data.get("people") or data.get("organic_results") or data.get("results") or []
-        )
         for item in items[: request.limit]:
             if not isinstance(item, dict):
                 continue
+            full_name = (
+                item.get("fullName")
+                or item.get("full_name")
+                or " ".join(
+                    p
+                    for p in [
+                        str(item.get("first_name") or item.get("firstName") or "").strip(),
+                        str(item.get("last_name") or item.get("lastName") or "").strip(),
+                    ]
+                    if p
+                )
+                or slug
+            )
+            url = (
+                item.get("linkedin_url")
+                or item.get("profile_url")
+                or item.get("url")
+                or f"https://www.linkedin.com/in/{slug}"
+            )
+            snippet_parts = [
+                item.get("headline") or item.get("occupation") or "",
+                item.get("location") or item.get("city") or "",
+                item.get("company") or "",
+            ]
+            about = item.get("about") or item.get("summary") or item.get("description") or ""
+            snippet = " · ".join(p for p in snippet_parts if p) or str(about)[:280]
             extra = {
                 k: v
                 for k, v in item.items()
-                if k not in {"name", "title", "link", "url", "profile_url"}
+                if k
+                not in {
+                    "fullName",
+                    "full_name",
+                    "first_name",
+                    "last_name",
+                    "firstName",
+                    "lastName",
+                    "headline",
+                    "about",
+                    "summary",
+                    "description",
+                    "linkedin_url",
+                    "profile_url",
+                    "url",
+                }
             }
-            extra["scrapingdog_endpoint"] = "linkedin/search"
+            extra["scrapingdog_endpoint"] = "profile"
+            extra["linkedin_slug"] = slug
             results.append(
                 SearchResultItem(
-                    title=item.get("name") or item.get("title") or "",
-                    url=_clean_url(
-                        item.get("link") or item.get("profile_url") or item.get("url") or ""
-                    ),
-                    snippet=item.get("headline")
-                    or item.get("snippet")
-                    or item.get("about")
-                    or item.get("title")
-                    or "",
+                    title=str(full_name),
+                    url=_clean_url(str(url)),
+                    snippet=str(snippet),
                     source=self.name,
                     extra=_redact_secrets(extra),
+                    content=str(about) if about else None,
                 )
             )
         return ProviderResponse(
             results=results,
             raw={
-                "endpoint": "linkedin/search",
+                "endpoint": "profile",
                 "endpoint_attempts": endpoint_attempts,
-                "items": data if isinstance(data, list) else data,
+                "items": data,
             },
         )
 

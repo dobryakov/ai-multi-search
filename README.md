@@ -104,14 +104,21 @@ Each search/scrape/MCP tool response includes a top-level `usage` block for **th
 
 ### Provider cooldown
 
-After `401/402/403/429` (or quota/auth-like error text), a provider is skipped for `PROVIDER_COOLDOWN_SECONDS` (default 900). Status appears in `GET /v1/capabilities` (`cooldown`, `cooldown_remaining_seconds`, `cooldown_reason`) and in per-request `usage.providers[].outcome = "skipped_cooldown"`.
+After provider-API `401/402/429` (or quota/auth-like error text), a provider is skipped for `PROVIDER_COOLDOWN_SECONDS` (default 900). **`403` is not a cooldown** — for scrapers like Trafilatura that is usually the *target page*, not provider auth.
+
+Upstream `5xx` on paid search endpoints (e.g. Scrapingdog Google HTML 500) also cools that provider so every `person_search` does not keep hitting a dead hop.
+
+Status appears in `GET /v1/capabilities` (`cooldown`, `cooldown_remaining_seconds`, `cooldown_reason`) and in per-request `usage.providers[].outcome = "skipped_cooldown"`.
 
 ### Scrapingdog Google (last resort)
 
 `scrapingdog_google` (`/google`) is registered only as the **last** `web_search` provider.  
 Person/company flows try specialized providers first, then the rest of `web_search`, and only then Scrapingdog Google. It is never used as an early internal fallback from LinkedIn people/company search.
 
-`scrapingdog_people` calls LinkedIn people search only when the query parses to a real person name (skips role queries like “who is the CTO of …”).  
+**People by name:** Scrapingdog has no people-by-name search (`/linkedin/search?type=people` is broken upstream). `person_search` with a free-text name runs the normal cheap search chain (`serper_person` / SearXNG / Serper / … / last-resort `scrapingdog_google`) with `site:linkedin.com/in` appended — **not** Scrapingdog Google.
+
+**People by LinkedIn id (expensive):** `scrapingdog_people` uses Profile API `GET /profile/?type=profile&id=<linkedin_id>` when the query is a LinkedIn person URL (`linkedin.com/in/rbranson`) or a bare vanity id (`rbranson`). **Cost: 50–100 Scrapingdog credits per successful request.** Free-text names skip this provider with no HTTP call. Prefer SERP discovery first; use Profile only when you already have the id and need full profile JSON.
+
 `scrapingdog_company` uses Profile API `GET /profile/?type=company&id=<linkedin_slug>` (docs example is by LinkedIn universal name like `amazon`, **not** free-text name search). Expensive (~50 credits) — runs only after cheaper company/web providers, just before `scrapingdog_google`. Skips when no slug/URL can be derived.
 
 `search_and_scrape` is a composite of available `web_search` + `scrape` providers (no dedicated provider class).

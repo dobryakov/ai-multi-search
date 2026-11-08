@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.normalize.schema import ScrapeRequest, SearchRequest
 from app.services.search import SearchService
@@ -140,8 +141,52 @@ def create_mcp() -> FastMCP:
     return server
 
 
-def mcp_asgi_app(mcp: FastMCP) -> Starlette:
+class _RejectBareMcpGet:
+    """Reject session-less GET (SSE) so clients do not hang on an empty stream.
+
+    Streamable HTTP uses GET for an established session's event stream. A bare
+    GET without ``Mcp-Session-Id`` previously returned 200 + endless empty SSE.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("method") == "GET":
+            headers = {
+                k.decode("latin-1").lower(): v.decode("latin-1")
+                for k, v in (scope.get("headers") or [])
+            }
+            session = headers.get("mcp-session-id") or headers.get("x-mcp-session-id")
+            if not session:
+                body = json.dumps(
+                    {
+                        "error": "mcp_sse_requires_session",
+                        "message": (
+                            "GET /mcp opens an SSE stream only with an active "
+                            "Mcp-Session-Id. Initialize via POST first."
+                        ),
+                    }
+                ).encode("utf-8")
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 405,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode("ascii")),
+                            (b"allow", b"POST, DELETE"),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+def mcp_asgi_app(mcp: FastMCP) -> ASGIApp:
     """HTTP mount without nested lifespan (parent FastAPI owns session_manager.run())."""
     # Initialize session manager via FastMCP helper, then remount routes without lifespan.
     wrapped = mcp.streamable_http_app()
-    return Starlette(routes=list(wrapped.routes), middleware=list(wrapped.user_middleware))
+    inner = Starlette(routes=list(wrapped.routes), middleware=list(wrapped.user_middleware))
+    return _RejectBareMcpGet(inner)

@@ -20,6 +20,26 @@ def test_cooldown_reason_http_status():
     assert cooldown_reason_from_error(exc) == "http_429"
 
 
+def test_cooldown_ignores_target_page_403():
+    """Trafilatura 403 is the scraped site, not provider auth — must not cool down."""
+    req = httpx.Request("GET", "https://tld-list.com/")
+    resp = httpx.Response(403, request=req)
+    exc = httpx.HTTPStatusError("Forbidden", request=req, response=resp)
+    assert cooldown_reason_from_error(exc) is None
+    assert cooldown_reason_from_error(RuntimeError("Client error '403 Forbidden'")) is None
+
+
+def test_cooldown_reason_upstream_5xx_endpoint_error():
+    from app.providers.errors import ProviderEndpointError
+
+    exc = ProviderEndpointError(
+        "scrapingdog google people failed status=500",
+        endpoint="google",
+        endpoint_attempts=[{"endpoint": "google", "type": "people_linkedin", "status_code": 500}],
+    )
+    assert cooldown_reason_from_error(exc) == "upstream_500"
+
+
 def test_cooldown_reason_quota_text():
     assert cooldown_reason_from_error(RuntimeError("Insufficient credits")) == "quota_or_auth_message"
     assert cooldown_reason_from_error(RuntimeError("random timeout")) is None
