@@ -1,0 +1,9 @@
+# Example Caddy site block.
+# Paste into your reverse-proxy Caddyfile, then reload Caddy.
+# Replace search.example.com with your public hostname.
+
+search.example.com {
+	reverse_proxy ai-multi-search-api:8000 {
+		flush_interval -1
+	}
+}

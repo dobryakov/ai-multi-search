@@ -1,0 +1,301 @@
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any
+
+from app.cache.redis import Cache, get_cache
+from app.config import Settings, get_settings
+from app.intent.router import IntentRouter
+from app.normalize.schema import (
+    CapabilitiesResponse,
+    CapabilityName,
+    ScrapeRequest,
+    ScrapeResult,
+    SearchRequest,
+    SearchResponse,
+)
+from app.providers.base import ProviderRequest
+from app.providers.manager import ProviderManager, build_default_manager
+from app.usage.tracker import UsageTracker, get_usage_tracker
+
+logger = logging.getLogger(__name__)
+
+
+class SearchService:
+    def __init__(
+        self,
+        manager: ProviderManager | None = None,
+        intent: IntentRouter | None = None,
+        cache: Cache | None = None,
+        usage: UsageTracker | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        self.settings = settings or get_settings()
+        self.usage = usage or get_usage_tracker()
+        self.manager = manager or build_default_manager(self.settings, usage=self.usage)
+        self.intent = intent or IntentRouter(self.settings)
+        self.cache = cache or get_cache()
+
+    def capabilities(self) -> CapabilitiesResponse:
+        return self.manager.registry.describe()
+
+    async def usage_snapshot(self) -> dict[str, Any]:
+        return await self.usage.snapshot()
+
+    async def _record_openrouter(self, usage: dict[str, Any] | None) -> None:
+        if not usage:
+            return
+        await self.usage.record_openrouter(
+            ok=bool(usage.get("ok", True)),
+            model=str(usage.get("model") or self.settings.llm_model),
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            cost=float(usage.get("cost_usd") or 0.0),
+        )
+
+    def _log_request(
+        self,
+        *,
+        capability: str,
+        query: str,
+        provider_used: str | None,
+        fallback_chain: list[str],
+        latency_ms: float,
+        status: str,
+        api_key_hint: str = "",
+        error: str | None = None,
+        openrouter_usage: dict[str, Any] | None = None,
+        provider_attempts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        or_cost = (openrouter_usage or {}).get("cost_usd")
+        logger.info(
+            "search capability=%s status=%s provider=%s latency_ms=%.1f key=%s chain=%s "
+            "openrouter_cost=%s attempts=%s query=%r%s",
+            capability,
+            status,
+            provider_used,
+            latency_ms,
+            api_key_hint or "-",
+            ",".join(fallback_chain),
+            or_cost,
+            len(provider_attempts or []),
+            query[:200],
+            f" error={error}" if error else "",
+        )
+
+    async def search(self, req: SearchRequest, *, api_key_hint: str = "") -> SearchResponse:
+        started = time.perf_counter()
+        decision = await self.intent.route(req.query, req.type)
+        await self._record_openrouter(decision.openrouter_usage)
+        capability: CapabilityName = decision.capability
+        if req.scrape and capability == "web_search":
+            capability = "search_and_scrape"
+
+        cache_params = {
+            "limit": req.limit,
+            "language": req.language,
+            "country": req.country,
+            "scrape": req.scrape,
+            "formats": req.formats,
+            "type": req.type,
+        }
+        cache_key = self.cache.make_key(capability, decision.normalized_query, cache_params)
+        cached = await self.cache.get_json(cache_key)
+        if cached:
+            response = SearchResponse.model_validate(cached)
+            response.meta = {
+                **response.meta,
+                "cache_hit": True,
+                "intent_source": decision.source,
+                "confidence": decision.confidence,
+                "openrouter_usage": decision.openrouter_usage or response.meta.get("openrouter_usage"),
+            }
+            await self.usage.record_request(capability=capability, status="ok", cache_hit=True)
+            self._log_request(
+                capability=capability,
+                query=req.query,
+                provider_used=response.provider_used,
+                fallback_chain=response.fallback_chain,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status="ok",
+                api_key_hint=api_key_hint,
+                openrouter_usage=decision.openrouter_usage,
+            )
+            return response
+
+        provider_attempts: list[dict[str, Any]] = []
+        try:
+            if capability == "scrape":
+                url = str(decision.entities.get("url") or decision.normalized_query)
+                scrape_resp = await self._scrape_url(url, req.formats)
+                provider_attempts = scrape_resp["attempts"]
+                response = SearchResponse(
+                    capability="scrape",
+                    provider_used=scrape_resp["provider_used"],
+                    fallback_chain=scrape_resp["fallback_chain"],
+                    scrape_results=scrape_resp["results"],
+                    meta={
+                        "intent_source": decision.source,
+                        "confidence": decision.confidence,
+                        "cache_hit": False,
+                        "openrouter_usage": decision.openrouter_usage or None,
+                        "provider_attempts": provider_attempts,
+                    },
+                )
+            elif capability == "search_and_scrape":
+                response = await self._search_and_scrape(req, decision.normalized_query, decision)
+                provider_attempts = list(response.meta.get("provider_attempts") or [])
+            else:
+                provider_req = ProviderRequest(
+                    query=decision.normalized_query,
+                    limit=req.limit,
+                    language=req.language,
+                    country=req.country,
+                )
+                raw, used, chain, attempts = await self.manager.execute(capability, provider_req)
+                provider_attempts = attempts
+                response = SearchResponse(
+                    capability=capability,
+                    provider_used=used,
+                    fallback_chain=chain,
+                    results=raw.results,
+                    meta={
+                        "intent_source": decision.source,
+                        "confidence": decision.confidence,
+                        "cache_hit": False,
+                        "errors": raw.raw.get("errors"),
+                        "openrouter_usage": decision.openrouter_usage or None,
+                        "provider_attempts": attempts,
+                    },
+                )
+
+            status = "ok" if (response.results or response.scrape_results) else "empty"
+            await self.cache.set_json(cache_key, response.model_dump(mode="json"))
+            await self.usage.record_request(capability=capability, status=status, cache_hit=False)
+            self._log_request(
+                capability=capability,
+                query=req.query,
+                provider_used=response.provider_used,
+                fallback_chain=response.fallback_chain,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status=status,
+                api_key_hint=api_key_hint,
+                openrouter_usage=decision.openrouter_usage,
+                provider_attempts=provider_attempts,
+            )
+            return response
+        except Exception as exc:  # noqa: BLE001
+            await self.usage.record_request(capability=capability, status="error", cache_hit=False)
+            self._log_request(
+                capability=capability,
+                query=req.query,
+                provider_used=None,
+                fallback_chain=[],
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status="error",
+                api_key_hint=api_key_hint,
+                error=str(exc),
+                openrouter_usage=decision.openrouter_usage,
+                provider_attempts=provider_attempts,
+            )
+            raise
+
+    async def scrape(self, req: ScrapeRequest, *, api_key_hint: str = "") -> SearchResponse:
+        started = time.perf_counter()
+        url = str(req.url)
+        try:
+            scrape_resp = await self._scrape_url(url, req.formats)
+            response = SearchResponse(
+                capability="scrape",
+                provider_used=scrape_resp["provider_used"],
+                fallback_chain=scrape_resp["fallback_chain"],
+                scrape_results=scrape_resp["results"],
+                meta={
+                    "cache_hit": False,
+                    "provider_attempts": scrape_resp["attempts"],
+                },
+            )
+            status = "ok" if response.scrape_results else "empty"
+            await self.usage.record_request(capability="scrape", status=status, cache_hit=False)
+            self._log_request(
+                capability="scrape",
+                query=url,
+                provider_used=response.provider_used,
+                fallback_chain=response.fallback_chain,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status=status,
+                api_key_hint=api_key_hint,
+                provider_attempts=scrape_resp["attempts"],
+            )
+            return response
+        except Exception as exc:  # noqa: BLE001
+            await self.usage.record_request(capability="scrape", status="error", cache_hit=False)
+            self._log_request(
+                capability="scrape",
+                query=url,
+                provider_used=None,
+                fallback_chain=[],
+                latency_ms=(time.perf_counter() - started) * 1000,
+                status="error",
+                api_key_hint=api_key_hint,
+                error=str(exc),
+            )
+            raise
+
+    async def _scrape_url(self, url: str, formats: list[str]) -> dict[str, Any]:
+        raw, used, chain, attempts = await self.manager.execute(
+            "scrape",
+            ProviderRequest(url=url, formats=formats),
+        )
+        return {
+            "provider_used": used,
+            "fallback_chain": chain,
+            "results": raw.scrape_results,
+            "attempts": attempts,
+        }
+
+    async def _search_and_scrape(
+        self,
+        req: SearchRequest,
+        query: str,
+        decision: Any,
+    ) -> SearchResponse:
+        provider_req = ProviderRequest(
+            query=query,
+            limit=req.limit,
+            language=req.language,
+            country=req.country,
+        )
+        raw, used, chain, attempts = await self.manager.execute("web_search", provider_req)
+        scrape_results: list[ScrapeResult] = []
+        scrape_chain: list[str] = []
+        all_attempts = list(attempts)
+        for item in raw.results[: min(3, req.limit)]:
+            if not item.url:
+                continue
+            try:
+                part = await self._scrape_url(item.url, req.formats)
+                scrape_results.extend(part["results"])
+                scrape_chain.extend(part["fallback_chain"])
+                all_attempts.extend(part["attempts"])
+                if part["results"]:
+                    md = part["results"][0].markdown or part["results"][0].text
+                    item.content = md
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("scrape after search failed for %s: %s", item.url, exc)
+
+        return SearchResponse(
+            capability="search_and_scrape",
+            provider_used=used,
+            fallback_chain=chain + scrape_chain,
+            results=raw.results,
+            scrape_results=scrape_results,
+            meta={
+                "intent_source": decision.source,
+                "confidence": decision.confidence,
+                "cache_hit": False,
+                "openrouter_usage": decision.openrouter_usage or None,
+                "provider_attempts": all_attempts,
+            },
+        )
