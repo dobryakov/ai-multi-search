@@ -1,0 +1,17 @@
+# Private instance for ai-multi-search (JSON API enabled, limiter off).
+use_default_settings: true
+
+general:
+  instance_name: "ai-multi-search"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  image_proxy: false
+  method: "GET"

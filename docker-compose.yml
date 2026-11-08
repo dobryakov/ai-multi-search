@@ -6,8 +6,11 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
     depends_on:
       redis:
+        condition: service_healthy
+      searxng:
         condition: service_healthy
     ports:
       - "127.0.0.1:18100:8000"
@@ -38,6 +41,39 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Private meta-search (JSON API). Not published to host; only api → searxng.
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: ai-multi-search-searxng
+    restart: unless-stopped
+    networks: [internal]
+    volumes:
+      - ./deploy/searxng:/etc/searxng:rw
+      - searxng-data:/var/cache/searxng
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-changeme-searxng-secret-key}
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/healthz",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  searxng-data:
 
 networks:
   internal:

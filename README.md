@@ -20,6 +20,8 @@ docker compose up -d --build
 curl -s http://127.0.0.1:18100/health
 ```
 
+Compose also starts a **private SearXNG** (`ai-multi-search-searxng`, config in `deploy/searxng/`) on the internal network. API uses `SEARXNG_URL=http://searxng:8080` by default; JSON search format is enabled. No host port is published.
+
 Local debug port defaults to `127.0.0.1:18100` (container still listens on `8000` internally).
 
 ## HTTP API
